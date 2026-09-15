@@ -46,11 +46,13 @@ export interface PriceData {
   items?: PricedItem[]
 }
 
-/** Cities the snapshot has data for. */
+/** Cities the snapshot actually has branches for (empty ones are hidden). */
 export function availableCities(data: PriceData | null): string[] {
   if (!data) return []
+  if (data.byCity) {
+    return Object.keys(data.byCity).filter((c) => (data.byCity![c].stores?.length ?? 0) > 0)
+  }
   if (data.cities?.length) return data.cities
-  if (data.byCity) return Object.keys(data.byCity)
   return data.city ? [data.city] : []
 }
 
