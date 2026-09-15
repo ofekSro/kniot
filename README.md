@@ -1,0 +1,279 @@
+<div dir="rtl">
+
+# 🛒 רשימת קניות
+
+רשימת קניות משותפת לשני אנשים. מסתנכרנת בזמן אמת בין הטלפונים, עובדת גם בלי אינטרנט
+בתוך הסופר, ונפתחת כאפליקציה במסך הבית.
+
+**מה יש בפנים**
+
+- התחברות עם Google, וגישה רק לשתי כתובות מייל מאושרות
+- רשימה אחת משותפת, מחולקת לקטגוריות לפי סדר ההליכה בסופר
+- השלמה אוטומטית מההיסטוריה — מוצר שקניתם כבר זוכר את הקטגוריה והכמות שלו
+- מועדפים, להוספה מהירה של הקניות הקבועות
+- מצב לילה, ותמיכה מלאה בעברית ובכיוון ימין‑לשמאל
+
+---
+
+## ✅ הפרויקט כבר מוגדר ופרוס
+
+| | |
+| --- | --- |
+| כתובת חיה | **https://kniot-1299d.web.app** |
+| מזהה פרויקט | `kniot-1299d` |
+| משתמשים מורשים | `ofekro@gmail.com`, `carmel323zairi@gmail.com` |
+
+ההוראות שלמטה נחוצות רק להקמה מאפס, או כדי לשחזר את ההגדרות.
+
+---
+
+## דרישות מוקדמות
+
+- [Node.js](https://nodejs.org) גרסה 20.19 ומעלה (מומלץ 22)
+- חשבון Google
+- אין צורך להתקין את Firebase CLI — כל הפקודות כאן משתמשות ב‑`npx`
+
+---
+
+## שלב 1 — יצירת פרויקט ב‑Firebase
+
+1. היכנסו ל‑[console.firebase.google.com](https://console.firebase.google.com) ולחצו
+   **Add project**.
+2. תנו שם לפרויקט (למשל `kniot`). אפשר לכבות את Google Analytics — לא צריך אותו.
+3. אחרי היצירה, בתפריט הצדדי: **Build → Firestore Database → Create database**.
+   - בחרו מיקום קרוב (למשל `europe-west1`).
+   - בחרו **Start in production mode**. הכללים שבקובץ `firestore.rules` יעלו בשלב 5
+     ויחליפו את ברירת המחדל.
+
+## שלב 2 — הפעלת התחברות עם Google
+
+אפשר לעשות את זה מהשורה פקודה, בלי הקונסולה. הקובץ `firebase.json` כולל:
+
+<div dir="ltr">
+
+```json
+"auth": {
+  "providers": {
+    "googleSignIn": {
+      "oAuthBrandDisplayName": "Kniot",
+      "supportEmail": "ofekro@gmail.com"
+    }
+  }
+}
+```
+
+</div>
+
+ואז:
+
+<div dir="ltr">
+
+```bash
+npx firebase-tools deploy --only auth
+```
+
+</div>
+
+זה מפעיל את ספק Google **ויוצר אוטומטית את לקוח ה‑OAuth** — אין צורך ב‑client ID ידני.
+
+> אל תוסיפו `authorizedRedirectUris` עם `/__/auth/handler`. ה‑CLI מוסיף אותה לבד,
+> וכתובת כפולה מפילה את הפריסה בשגיאת `FIELD_INVALID`.
+
+### הדרך דרך הקונסולה (חלופה)
+
+**Authentication → Get started → Google → Enable** ← בחרו מייל תמיכה ← **Save**.
+
+### דומיינים מאושרים
+
+נוספים אוטומטית עם Hosting. לבדיקה: **Authentication → Settings → Authorized domains**
+אמורים להופיע `kniot-1299d.web.app` ו‑`kniot-1299d.firebaseapp.com`.
+בלי זה ההתחברות נכשלת עם `auth/unauthorized-domain`.
+
+## שלב 3 — הגדרת `.env`
+
+בקונסולה: **⚙️ Project settings → General**, גללו ל‑**Your apps** ולחצו על אייקון
+ה‑Web (`</>`) כדי לרשום אפליקציית Web. העתיקו משם את ערכי ה‑config.
+
+בתיקיית הפרויקט:
+
+<div dir="ltr">
+
+```bash
+cp .env.example .env
+```
+
+</div>
+
+פתחו את `.env` ומלאו את הערכים. שימו לב לשני המשתנים שאינם מתחילים ב‑`VITE_`:
+
+- `ALLOWED_EMAILS` — שתי כתובות המייל שיקבלו גישה, מופרדות בפסיק
+- `GOOGLE_APPLICATION_CREDENTIALS` — נתיב לקובץ מפתח של Service Account
+
+את קובץ המפתח מורידים ב‑**Project settings → Service accounts → Generate new
+private key**. שמרו אותו בתיקיית הפרויקט בשם `service-account.json`.
+
+> ⚠️ `.env` וקובץ ה‑Service Account כבר מופיעים ב‑`.gitignore`. אל תעלו אותם ל‑Git.
+> ערכי `VITE_FIREBASE_*` הם ציבוריים מעצם טבעם — ההגנה על המידע נעשית בכללי
+> Firestore, לא בהסתרתם.
+
+## שלב 4 — התקנה והרשאת המשתמשים
+
+<div dir="ltr">
+
+```bash
+npm install
+npm run seed
+```
+
+</div>
+
+`npm run seed` כותב את המסמך `config/allowedUsers` עם שתי כתובות המייל מתוך `.env`.
+הסקריפט משתמש ב‑Admin SDK, שעוקף את כללי Firestore — וזה הכרחי, כי הכללים מתירים
+קריאה של המסמך הזה רק למי שכבר נמצא ברשימה.
+
+**חלופה בלי Service Account:** אפשר ליצור את המסמך ידנית בקונסולה —
+**Firestore → Start collection** בשם `config`, מזהה מסמך `allowedUsers`, ובתוכו שדה
+בשם `emails` מסוג `array` עם שתי כתובות המייל.
+
+כדי לשנות מאוחר יותר את רשימת המורשים: עדכנו את `ALLOWED_EMAILS` והריצו שוב
+`npm run seed`.
+
+## שלב 5 — הרצה מקומית
+
+<div dir="ltr">
+
+```bash
+npm run dev
+```
+
+</div>
+
+פתחו את הכתובת שמופיעה במסוף. אם חסרים ערכים ב‑`.env`, האפליקציה תציג מסך הסבר
+במקום מסך ההתחברות.
+
+**בדיקת הכללים לפני העלאה** (דורש Java מותקן):
+
+<div dir="ltr">
+
+```bash
+npx firebase-tools emulators:start --only firestore
+```
+
+</div>
+
+## שלב 6 — העלאה לאוויר
+
+ערכו את `.firebaserc` והחליפו את `REPLACE_WITH_YOUR_PROJECT_ID` במזהה הפרויקט
+שלכם, או הריצו:
+
+<div dir="ltr">
+
+```bash
+npx firebase-tools login
+npx firebase-tools use --add
+```
+
+</div>
+
+ואז:
+
+<div dir="ltr">
+
+```bash
+npm run build
+npx firebase-tools deploy
+```
+
+</div>
+
+הפקודה מעלה גם את האתר וגם את `firestore.rules`. בסיום יודפס הקישור —
+`https://<שם-הפרויקט>.web.app`.
+
+להעלאת הכללים בלבד:
+
+<div dir="ltr">
+
+```bash
+npx firebase-tools deploy --only firestore:rules
+```
+
+</div>
+
+---
+
+## התקנה בטלפון
+
+### אייפון (iOS)
+
+1. פתחו את הקישור **ב‑Safari** (חובה — בדפדפנים אחרים ההתקנה לא זמינה).
+2. לחצו על כפתור **שיתוף** (⬆️ בתחתית המסך).
+3. גללו ובחרו **הוספה למסך הבית**.
+4. אשרו בלחיצה על **הוסף**.
+
+### אנדרואיד
+
+1. פתחו את הקישור ב‑Chrome.
+2. יופיע באנר **התקנת אפליקציה** — לחצו עליו.
+3. אם הבאנר לא הופיע: תפריט ⋮ → **התקנת אפליקציה** / **הוספה למסך הבית**.
+
+אחרי ההתקנה האפליקציה נפתחת במסך מלא, בלי סרגל הכתובות.
+
+---
+
+## שימוש יומיומי
+
+| פעולה | איך |
+| --- | --- |
+| הוספת מוצר | הקלידו בשורה העליונה ולחצו Enter |
+| בחירה מההשלמות | הקלידו כמה אותיות ובחרו מהרשימה שנפתחת |
+| עריכה | לחיצה על שורת המוצר פותחת חלון עריכה |
+| סימון כנקנה | סימון תיבת הסימון — המוצר עובר לקטע "נקנו" |
+| סיום קנייה | כפתור **סיימתי קנייה** — שומר הכל בהיסטוריה ומנקה את הרשימה |
+| מועדפים | כפתור ⭐ ליד שורת ההוספה |
+| מצב לילה | דרך תמונת הפרופיל בפינה → **מראה** |
+
+**עבודה בלי רשת:** האפליקציה עובדת במלואה גם בלי אינטרנט. יופיע פס צהוב
+"לא מחובר – השינויים יסונכרנו", וכל השינויים יעלו לענן ברגע שהחיבור חוזר.
+ההתחברות הראשונה בלבד מחייבת רשת.
+
+---
+
+## פקודות
+
+| פקודה | מה היא עושה |
+| --- | --- |
+| `npm run dev` | שרת פיתוח |
+| `npm run build` | בדיקת טיפוסים ובנייה לפרודקשן |
+| `npm run preview` | תצוגה מקומית של הבנייה |
+| `npm run seed` | כתיבת רשימת המשתמשים המורשים |
+| `npm run icons` | יצירה מחדש של אייקוני האפליקציה |
+
+## מבנה הפרויקט
+
+<div dir="ltr">
+
+```
+src/
+  lib/firebase.ts        אתחול Firebase + מטמון אופליין
+  lib/categories.ts      הקטגוריות + ניחוש קטגוריה לפי מילות מפתח
+  lib/theme.ts           מצב תצוגה (מערכת / בהיר / כהה)
+  hooks/                 useAuth, useItems, useHistory, useFavorites, useOnline
+  components/            רכיבי הממשק
+firestore.rules          הרשאות הגישה — כאן נאכפת רשימת המורשים
+scripts/seedAllowedUsers.ts   כתיבת config/allowedUsers
+scripts/generateIcons.mjs     יצירת אייקוני ה‑PWA
+```
+
+</div>
+
+## פתרון תקלות
+
+| תופעה | פתרון |
+| --- | --- |
+| מסך "צריך להשלים הגדרה" | חסרים ערכים ב‑`.env`. מלאו והפעילו מחדש את `npm run dev` |
+| `auth/unauthorized-domain` | הוסיפו את הדומיין ב‑Authentication → Settings → Authorized domains |
+| מסך "אין לך גישה" | המייל לא נמצא ב‑`config/allowedUsers`. עדכנו את `ALLOWED_EMAILS` והריצו `npm run seed` |
+| `Missing or insufficient permissions` | הכללים לא הועלו. הריצו `npx firebase-tools deploy --only firestore:rules` |
+| האפליקציה לא מתעדכנת אחרי העלאה | סגרו ופתחו מחדש את האפליקציה. עדכון ה‑Service Worker נכנס לתוקף בפתיחה הבאה |
+
+</div>

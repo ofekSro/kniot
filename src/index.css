@@ -1,0 +1,262 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Skin system: every color in the app is a semantic token (--sk-*), and each
+ * skin defines the full set twice — light on the bare selector, dark under
+ * .dark. Components never use raw palette classes; they use the utilities
+ * mapped below (bg-card, text-ink, bg-accent...), so a skin switch is just a
+ * data-skin attribute change on <html>.
+ */
+@theme inline {
+  --color-app-bg: var(--sk-bg);
+  --color-card: var(--sk-card);
+  --color-field: var(--sk-field);
+  --color-edge: var(--sk-edge);
+  --color-edge-strong: var(--sk-edge-strong);
+  --color-track: var(--sk-track);
+  --color-band: var(--sk-band);
+  --color-ink: var(--sk-ink);
+  --color-ink-muted: var(--sk-ink-muted);
+  --color-ink-faint: var(--sk-ink-faint);
+  --color-accent: var(--sk-accent);
+  --color-on-accent: var(--sk-on-accent);
+  --color-accent-soft: var(--sk-accent-soft);
+  --color-accent-ink: var(--sk-accent-ink);
+  --font-display: var(--sk-font-display);
+}
+
+@theme {
+  --font-sans:
+    'Heebo', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;
+}
+
+/* ---------- classic (the original look) ---------- */
+:root {
+  color-scheme: light;
+  --sk-bg: #fafaf9;
+  --sk-card: #ffffff;
+  --sk-field: #ffffff;
+  --sk-edge: #e7e5e4;
+  --sk-edge-strong: #d6d3d1;
+  --sk-track: #f5f5f4;
+  --sk-band: rgba(231, 229, 228, 0.7);
+  --sk-ink: #1c1917;
+  --sk-ink-muted: #78716c;
+  --sk-ink-faint: #a8a29e;
+  --sk-accent: #16a34a;
+  --sk-on-accent: #ffffff;
+  --sk-accent-soft: #f0fdf4;
+  --sk-accent-ink: #15803d;
+  --sk-font-display: var(--font-sans);
+  --sk-font-body: var(--font-sans);
+  --flash-color: color-mix(in oklab, var(--sk-accent) 22%, transparent);
+}
+:root.dark {
+  color-scheme: dark;
+  --sk-bg: #0c0a09;
+  --sk-card: #1c1917;
+  --sk-field: #0c0a09;
+  --sk-edge: #292524;
+  --sk-edge-strong: #44403c;
+  --sk-track: #292524;
+  --sk-band: rgba(41, 37, 36, 0.7);
+  --sk-ink: #f5f5f4;
+  --sk-ink-muted: #a8a29e;
+  --sk-ink-faint: #78716c;
+  --sk-accent: #22c55e;
+  --sk-on-accent: #052e14;
+  --sk-accent-soft: rgba(5, 46, 22, 0.55);
+  --sk-accent-ink: #4ade80;
+}
+
+/* ---------- מחברת השוק: warm paper, serif display, terracotta ---------- */
+:root[data-skin='market'] {
+  --sk-bg: #f7f1e6;
+  --sk-card: #fffdf8;
+  --sk-field: #fffdf8;
+  --sk-edge: #e8dcc3;
+  --sk-edge-strong: #d5c5a3;
+  --sk-track: #efe5d0;
+  --sk-band: rgba(232, 220, 195, 0.6);
+  --sk-ink: #33291b;
+  --sk-ink-muted: #8a7a5c;
+  --sk-ink-faint: #b5a382;
+  --sk-accent: #b95c27;
+  --sk-on-accent: #fdf6ea;
+  --sk-accent-soft: #f6e6d6;
+  --sk-accent-ink: #9a4a1d;
+  --sk-font-display: 'Frank Ruhl Libre', 'Times New Roman', serif;
+}
+:root[data-skin='market'].dark {
+  --sk-bg: #1a1510;
+  --sk-card: #262017;
+  --sk-field: #1a1510;
+  --sk-edge: #3a3022;
+  --sk-edge-strong: #4d3f2c;
+  --sk-track: #322a1d;
+  --sk-band: rgba(58, 48, 34, 0.6);
+  --sk-ink: #f0e7d8;
+  --sk-ink-muted: #b3a284;
+  --sk-ink-faint: #8a7a5c;
+  --sk-accent: #d98247;
+  --sk-on-accent: #241505;
+  --sk-accent-soft: #3a2818;
+  --sk-accent-ink: #e8a06a;
+}
+
+/* ---------- לילה בסופר: graphite + lime, Rubik ---------- */
+:root[data-skin='night'] {
+  --sk-bg: #f2f4f0;
+  --sk-card: #ffffff;
+  --sk-field: #ffffff;
+  --sk-edge: #dde2da;
+  --sk-edge-strong: #c3cabe;
+  --sk-track: #e6eae2;
+  --sk-band: rgba(221, 226, 218, 0.7);
+  --sk-ink: #171b16;
+  --sk-ink-muted: #5d665c;
+  --sk-ink-faint: #939c91;
+  --sk-accent: #65a30d;
+  --sk-on-accent: #ffffff;
+  --sk-accent-soft: #ecfccb;
+  --sk-accent-ink: #4d7c0f;
+  --sk-font-display: 'Rubik', var(--font-sans);
+  --sk-font-body: 'Rubik', var(--font-sans);
+}
+:root[data-skin='night'].dark {
+  --sk-bg: #0f1113;
+  --sk-card: #16191c;
+  --sk-field: #121517;
+  --sk-edge: #23272c;
+  --sk-edge-strong: #3a4046;
+  --sk-track: #1d2125;
+  --sk-band: rgba(29, 33, 37, 0.75);
+  --sk-ink: #eceeec;
+  --sk-ink-muted: #9aa3ab;
+  --sk-ink-faint: #6b7480;
+  --sk-accent: #a3e635;
+  --sk-on-accent: #131803;
+  --sk-accent-soft: rgba(163, 230, 53, 0.13);
+  --sk-accent-ink: #bef264;
+}
+
+/* ---------- צבעי מכולת: pastel category blocks, round display face ---------- */
+:root[data-skin='colorful'] {
+  --sk-bg: #fbf9f4;
+  --sk-card: #ffffff;
+  --sk-field: #ffffff;
+  --sk-edge: #e9e4d8;
+  --sk-edge-strong: #d7d0bf;
+  --sk-track: #f0ece1;
+  --sk-band: rgba(233, 228, 216, 0.7);
+  --sk-ink: #23303b;
+  --sk-ink-muted: #64707c;
+  --sk-ink-faint: #97a1ac;
+  --sk-accent: #22a45d;
+  --sk-on-accent: #ffffff;
+  --sk-accent-soft: #e9f6ee;
+  --sk-accent-ink: #1d8a4e;
+  --sk-font-display: 'Secular One', var(--font-sans);
+}
+:root[data-skin='colorful'].dark {
+  --sk-bg: #14171b;
+  --sk-card: #1d2126;
+  --sk-field: #14171b;
+  --sk-edge: #2b3037;
+  --sk-edge-strong: #3e444d;
+  --sk-track: #242930;
+  --sk-band: rgba(43, 48, 55, 0.7);
+  --sk-ink: #e9ecef;
+  --sk-ink-muted: #98a2ad;
+  --sk-ink-faint: #6b7580;
+  --sk-accent: #34c274;
+  --sk-on-accent: #062816;
+  --sk-accent-soft: rgba(52, 194, 116, 0.14);
+  --sk-accent-ink: #6ee7a0;
+}
+
+/* ---------- per-category flavour, driven by --cat-hue ---------- */
+
+/* colorful: each category card takes a pastel tint of its hue */
+:root[data-skin='colorful'] .cat-card {
+  background: oklch(0.965 0.032 var(--cat-hue));
+  border-color: oklch(0.9 0.045 var(--cat-hue));
+}
+:root[data-skin='colorful'].dark .cat-card {
+  background: oklch(0.27 0.028 var(--cat-hue));
+  border-color: oklch(0.35 0.035 var(--cat-hue));
+}
+:root[data-skin='colorful'] .cat-title {
+  color: oklch(0.48 0.105 var(--cat-hue));
+}
+:root[data-skin='colorful'].dark .cat-title {
+  color: oklch(0.82 0.08 var(--cat-hue));
+}
+
+/* night: a colored accent bar on the category's leading edge */
+:root[data-skin='night'] .cat-card {
+  border-inline-start: 3px solid oklch(0.62 0.15 var(--cat-hue));
+}
+:root[data-skin='night'].dark .cat-card {
+  border-inline-start-color: oklch(0.78 0.15 var(--cat-hue));
+}
+
+/* market: notebook-style dashed row dividers */
+:root[data-skin='market'] .cat-card > li {
+  border-top-style: dashed;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-app-bg text-ink antialiased;
+    font-family: var(--sk-font-body, var(--font-sans));
+    overscroll-behavior-y: none;
+  }
+
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@utility safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@utility safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes row-flash {
+  0%,
+  100% {
+    background-color: transparent;
+  }
+  30% {
+    background-color: var(--flash-color);
+  }
+}

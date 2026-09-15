@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // The single source of truth for access. Reads config/allowedUsers on every
+    // request; with two users that is a negligible amount of extra reads.
+    function allowed() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email
+             in get(/databases/$(database)/documents/config/allowedUsers).data.emails;
+    }
+
+    // Readable only by someone already on the list, so the email list is never
+    // exposed. Writable by nobody: it is seeded with the Admin SDK, which
+    // bypasses these rules entirely.
+    match /config/allowedUsers {
+      allow read: if allowed();
+      allow write: if false;
+    }
+
+    // Shared app settings the couple can edit from the UI (list title, etc.).
+    // Kept separate from allowedUsers, which stays admin-only.
+    match /config/settings {
+      allow read, write: if allowed();
+    }
+
+    match /items/{itemId} {
+      allow read, write: if allowed();
+    }
+
+    match /history/{nameKey} {
+      allow read, write: if allowed();
+    }
+
+    match /favorites/{nameKey} {
+      allow read, write: if allowed();
+    }
+
+    // Anything not listed above is closed, including any other config document.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

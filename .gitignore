@@ -1,0 +1,22 @@
+node_modules
+dist
+dist-ssr
+*.local
+
+# Secrets — never commit these.
+.env
+.env.*
+!.env.example
+service-account.json
+*-firebase-adminsdk-*.json
+
+.firebase
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.tsbuildinfo
