@@ -20,3 +20,4 @@ ui-debug.log
 !.vscode/extensions.json
 .idea
 *.tsbuildinfo
+scripts/out
