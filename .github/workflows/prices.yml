@@ -1,0 +1,47 @@
+name: מחירים יומיים
+
+on:
+  schedule:
+    - cron: '0 5 * * *' # 05:00 UTC ≈ 07:00–08:00 Israel, after portals refresh
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+permissions:
+  contents: write # push prices.json to the data branch
+
+concurrency:
+  group: prices
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch prices for tracked barcodes
+        env:
+          CITY: חיפה
+          TRACKED_URL: https://firestore.googleapis.com/v1/projects/kniot-1299d/databases/(default)/documents/config/trackedBarcodes
+        run: |
+          node scripts/fetchPrices.mjs \
+            --city "$CITY" \
+            --tracked-url "$TRACKED_URL" \
+            --out public_data
+          echo "--- output size ---"
+          ls -la public_data/
+          wc -c public_data/prices.json
+
+      - name: Publish to the data branch (served via raw.githubusercontent)
+        run: |
+          cd public_data
+          git init -q
+          git checkout -q -b data
+          git config user.name "kniot price bot"
+          git config user.email "actions@github.com"
+          git add prices.json branches.json
+          git commit -q -m "prices $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f -q "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data

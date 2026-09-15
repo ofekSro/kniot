@@ -21,3 +21,4 @@ ui-debug.log
 .idea
 *.tsbuildinfo
 scripts/out
+public_data

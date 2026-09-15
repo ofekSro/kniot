@@ -10,7 +10,7 @@
  *   node scripts/fetchPrices.mjs --city חיפה --max-branches 3 \
  *     --barcodes 7290000056845,7290000041445 --out scripts/out
  *
- * In CI the same fetch feeds Firestore writes (see .github/workflows).
+ * In CI the same fetch produces prices.json, published to GitHub Pages
  * Node >= 20, zero dependencies.
  */
 import { gunzipSync } from 'node:zlib'
@@ -233,7 +233,20 @@ async function main() {
   const chains = opt('chains', `shufersal,${Object.keys(CERBERUS_CHAINS).join(',')}`)
     .split(',')
     .filter(Boolean)
-  const wantedBarcodes = (opt('barcodes', '') || '').split(',').filter(Boolean)
+  let wantedBarcodes = (opt('barcodes', '') || '').split(',').filter(Boolean)
+
+  // In CI the barcode list comes from the public Firestore doc, not a flag.
+  const trackedUrl = opt('tracked-url', '')
+  if (trackedUrl && wantedBarcodes.length === 0) {
+    try {
+      const doc = await (await fetch(trackedUrl)).json()
+      const arr = doc?.fields?.codes?.arrayValue?.values ?? []
+      wantedBarcodes = arr.map((v) => v.stringValue).filter(Boolean)
+      console.log(`tracked barcodes from Firestore: ${wantedBarcodes.length}`)
+    } catch (e) {
+      console.log('could not read tracked barcodes:', e.message)
+    }
+  }
 
   mkdirSync(outDir, { recursive: true })
   const branches = []
@@ -286,7 +299,17 @@ async function main() {
   }
 
   writeFileSync(join(outDir, 'branches.json'), JSON.stringify(branches, null, 1))
-  writeFileSync(join(outDir, 'prices.json'), JSON.stringify(prices, null, 1))
+
+  // Compact payload the app fetches: branch registry + price-by-branch per barcode.
+  const published = {
+    city,
+    updatedAt: new Date().toISOString(),
+    branches: branches.map(({ key, chainName, name, address, items }) => ({
+      key, chain: chainName, name, address: address ?? '', items,
+    })),
+    prices, // { barcode: { name, byBranch: { branchKey: price } } }
+  }
+  writeFileSync(join(outDir, 'prices.json'), JSON.stringify(published))
   console.log(`\nbranches: ${branches.length} | tracked barcodes: ${Object.keys(prices).length}`)
   if (failures.length) console.log('failures:\n  ' + failures.join('\n  '))
 
