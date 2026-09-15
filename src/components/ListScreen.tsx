@@ -53,6 +53,10 @@ export function ListScreen({ user, onSignOut }: Props) {
     loading: pricesLoading,
     refreshing: pricesRefreshing,
     refresh: refreshPrices,
+    city: priceCity,
+    cities: priceCities,
+    setCity: setPriceCity,
+    addCity: addPriceCity,
   } = usePrices(active)
 
   const [splitByStore, setSplitByStore] = useState(() => {
@@ -332,6 +336,10 @@ export function ListScreen({ user, onSignOut }: Props) {
         loading={pricesLoading}
         refreshing={pricesRefreshing}
         onRefresh={() => void refreshPrices()}
+        city={priceCity}
+        cities={priceCities}
+        onCityChange={setPriceCity}
+        onAddCity={addPriceCity}
       />
 
       <Settings

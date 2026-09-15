@@ -285,7 +285,70 @@ async function readTracked(url) {
   for (const [k, v] of Object.entries(f.pins?.mapValue?.fields ?? {})) {
     if (v?.stringValue) pins[k] = v.stringValue
   }
-  return { products, pins }
+  const cities = (f.cities?.arrayValue?.values ?? [])
+    .map((v) => v.stringValue)
+    .filter(Boolean)
+  return { products, pins, cities }
+}
+
+/** Portal prices for ONE city, filtered to the wanted barcodes. */
+async function fetchCityPrices(city, wantedBarcodes, chains, maxBranches, failures) {
+  const stores = [] // { key, chain, name, address }
+  const priceByBarcode = {} // barcode -> { storeKey: price }
+
+  const collect = (branch, items) => {
+    const key = `${branch.chain}-${branch.id}`
+    stores.push({
+      key,
+      chain: branch.chainName,
+      name: branch.name || branch.id,
+      address: branch.address ?? '',
+    })
+    for (const it of items) {
+      if (!wantedBarcodes.has(it.code)) continue
+      priceByBarcode[it.code] ??= {}
+      const prev = priceByBarcode[it.code][key]
+      if (prev == null || it.price < prev) priceByBarcode[it.code][key] = it.price
+    }
+    console.log(`  ✓ [${city}] ${branch.chainName} ${branch.name || branch.id}: ${items.length} items`)
+  }
+
+  if (chains.includes('shufersal') && wantedBarcodes.size) {
+    try {
+      const list = (await shufersalBranches(city)).slice(0, maxBranches)
+      console.log(`[${city}] shufersal: ${list.length} branches`)
+      for (const b of list) {
+        try {
+          collect(b, await shufersalPriceFull(b.id))
+        } catch (e) {
+          failures.push(`${city} shufersal ${b.id}: ${e.message}`)
+        }
+      }
+    } catch (e) {
+      failures.push(`${city} shufersal: ${e.message}`)
+    }
+  }
+
+  for (const user of chains.filter((c) => c in CERBERUS_CHAINS)) {
+    if (!wantedBarcodes.size) break
+    try {
+      const portal = new Cerberus(user)
+      await portal.login()
+      const list = (await portal.branches(city)).slice(0, maxBranches)
+      console.log(`[${city}] ${user}: ${list.length} branches`)
+      for (const b of list) {
+        try {
+          collect(b, await portal.priceFull(b.id))
+        } catch (e) {
+          failures.push(`${city} ${user} ${b.id}: ${e.message}`)
+        }
+      }
+    } catch (e) {
+      failures.push(`${city} ${user}: ${e.message}`)
+    }
+  }
+
+  return { stores, priceByBarcode }
 }
 
 /** Turn tracked product names into { barcode -> {k, n, product, candidates} }. */
@@ -319,7 +382,6 @@ async function main() {
     const i = args.indexOf(`--${name}`)
     return i !== -1 ? args[i + 1] : dflt
   }
-  const city = opt('city', 'חיפה')
   const maxBranches = Number(opt('max-branches', '0')) || Infinity
   const outDir = opt('out', 'scripts/out')
   const chains = opt('chains', `shufersal,${Object.keys(CERBERUS_CHAINS).join(',')}`)
@@ -333,103 +395,82 @@ async function main() {
     .filter(Boolean)
     .map((n) => ({ k: nameKeyOf(n), n }))
   let pins = {}
+
+  // Cities: --city X (single) / --cities "X,Y", else the tracked doc, else Haifa.
+  let cities = (opt('cities', '') || '')
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean)
+  const singleCity = opt('city', '')
+  if (singleCity) cities.unshift(singleCity)
+
   const trackedUrl = opt('tracked-url', '')
   if (trackedUrl && products.length === 0) {
     const tracked = await readTracked(trackedUrl)
     products = tracked.products
     pins = tracked.pins
+    if (cities.length === 0) cities = tracked.cities
     console.log(`tracked products from Firestore: ${products.length}`)
   }
+  if (cities.length === 0) cities = ['חיפה']
+  cities = [...new Set(cities)]
 
-  // Resolve names → barcodes up front, via chp autocomplete.
+  // Resolve names → barcodes ONCE (a barcode is national; only prices vary by city).
   const { wanted, failures: resolveFailures } = await resolveBarcodes(products, pins)
   const wantedBarcodes = new Set(wanted.keys())
-  console.log(`resolved ${wantedBarcodes.size}/${products.length} products to barcodes`)
+  console.log(
+    `resolved ${wantedBarcodes.size}/${products.length} products; cities: ${cities.join(', ')}`,
+  )
 
   mkdirSync(outDir, { recursive: true })
-  const stores = [] // { key, chain, name, address }
-  const priceByBarcode = {} // barcode -> { storeKey: price }
   const failures = [...resolveFailures]
+  const byCity = {}
 
-  const collect = (branch, items) => {
-    const key = `${branch.chain}-${branch.id}`
-    stores.push({
-      key,
-      chain: branch.chainName,
-      name: branch.name || branch.id,
-      address: branch.address ?? '',
-    })
-    for (const it of items) {
-      if (!wantedBarcodes.has(it.code)) continue
-      priceByBarcode[it.code] ??= {}
-      const prev = priceByBarcode[it.code][key]
-      if (prev == null || it.price < prev) priceByBarcode[it.code][key] = it.price
+  for (const city of cities) {
+    const { stores, priceByBarcode } = await fetchCityPrices(
+      city,
+      wantedBarcodes,
+      chains,
+      maxBranches,
+      failures,
+    )
+    const items = []
+    for (const [barcode, meta] of wanted) {
+      items.push({
+        k: meta.k,
+        n: meta.n,
+        barcode,
+        product: meta.product,
+        byStore: priceByBarcode[barcode] ?? {},
+        candidates: meta.candidates,
+      })
     }
-    console.log(`  ✓ ${branch.chainName} ${branch.name || branch.id}: ${items.length} items`)
+    byCity[city] = { city, stores, items }
+    const priced = items.filter((it) => Object.keys(it.byStore).length).length
+    console.log(`[${city}] branches: ${stores.length} | priced: ${priced}/${items.length}`)
   }
 
-  if (chains.includes('shufersal') && wantedBarcodes.size) {
-    try {
-      const list = (await shufersalBranches(city)).slice(0, maxBranches)
-      console.log(`shufersal: ${list.length} branches in ${city}`)
-      for (const b of list) {
-        try {
-          collect(b, await shufersalPriceFull(b.id))
-        } catch (e) {
-          failures.push(`shufersal ${b.id}: ${e.message}`)
-        }
-      }
-    } catch (e) {
-      failures.push(`shufersal: ${e.message}`)
-    }
-  }
-
-  for (const user of chains.filter((c) => c in CERBERUS_CHAINS)) {
-    if (!wantedBarcodes.size) break
-    try {
-      const portal = new Cerberus(user)
-      await portal.login()
-      const list = (await portal.branches(city)).slice(0, maxBranches)
-      console.log(`${user}: ${list.length} branches in ${city}`)
-      for (const b of list) {
-        try {
-          collect(b, await portal.priceFull(b.id))
-        } catch (e) {
-          failures.push(`${user} ${b.id}: ${e.message}`)
-        }
-      }
-    } catch (e) {
-      failures.push(`${user}: ${e.message}`)
-    }
-  }
-
-  // Compose the compact payload the app fetches, keyed by the app's nameKey.
-  const items = []
-  for (const [barcode, meta] of wanted) {
-    items.push({
-      k: meta.k,
-      n: meta.n,
-      barcode,
-      product: meta.product,
-      byStore: priceByBarcode[barcode] ?? {},
-      candidates: meta.candidates,
-    })
-  }
+  const first = byCity[cities[0]]
   const payload = {
-    city,
     updatedAt: new Date().toISOString(),
-    stores,
-    items,
+    cities,
+    byCity,
+    // Back-compat top-level mirror of the first city (older app builds read this).
+    city: first.city,
+    stores: first.stores,
+    items: first.items,
   }
   writeFileSync(join(outDir, 'prices.json'), JSON.stringify(payload))
-  writeFileSync(join(outDir, 'branches.json'), JSON.stringify(stores, null, 1))
+  writeFileSync(
+    join(outDir, 'branches.json'),
+    JSON.stringify(Object.fromEntries(cities.map((c) => [c, byCity[c].stores])), null, 1),
+  )
 
-  const pricedCount = items.filter((it) => Object.keys(it.byStore).length).length
-  console.log(`\nbranches: ${stores.length} | priced products: ${pricedCount}/${items.length}`)
-  if (failures.length) console.log('failures:\n  ' + failures.join('\n  '))
+  if (failures.length) console.log('\nfailures:\n  ' + failures.join('\n  '))
 
+  const { stores, items } = first
   if (items.length && stores.length) {
-    console.log('\n--- basket ranking (coverage first, then total) ---')
+    console.log(`\n--- ${first.city}: ranking (coverage first, then total) ---`)
     const rank = stores
       .map((s) => {
         let total = 0

@@ -1,0 +1,48 @@
+/**
+ * Cities offered in the "add city" picker. The nightly job matches a city by
+ * substring against the chains' store files, so these are spelled the way they
+ * appear there. Not exhaustive — any city the couple adds is attempted on the
+ * next run, and shows data only if a chain has a branch there.
+ */
+export const CITIES = [
+  'חיפה',
+  'תל אביב',
+  'ירושלים',
+  'ראשון לציון',
+  'פתח תקווה',
+  'אשדוד',
+  'נתניה',
+  'באר שבע',
+  'חולון',
+  'בני ברק',
+  'רמת גן',
+  'רחובות',
+  'בת ים',
+  'אשקלון',
+  'הרצליה',
+  'כפר סבא',
+  'רעננה',
+  'חדרה',
+  'מודיעין',
+  'לוד',
+  'רמלה',
+  'נהריה',
+  'עכו',
+  'קריית אתא',
+  'קריית ביאליק',
+  'קריית מוצקין',
+  'קריית ים',
+  'נצרת',
+  'טבריה',
+  'כרמיאל',
+  'עפולה',
+  'אילת',
+  'דימונה',
+  'קריית גת',
+  'יבנה',
+  'נס ציונה',
+  'גבעתיים',
+  'הוד השרון',
+  'ראש העין',
+  'אור יהודה',
+] as const

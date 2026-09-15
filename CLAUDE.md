@@ -117,24 +117,28 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
   **UTF-16**, branch id is the third dash-segment of `PriceFull` filenames. Haifa: Shufersal
   + Rami Levy + Osher Ad return data; yohananof/TivTaam have no Haifa branch.
 - `.github/workflows/prices.yml` runs nightly: reads `config/trackedProducts` (the public
-  Firestore doc) via unauthenticated REST, resolves barcodes, fetches portal prices, and
-  force-pushes a compact `prices.json` to the orphan `data` branch using the built-in
-  `github.token` — **no service-account key, no secret**. Shape: `{city, updatedAt,
-  stores:[{key,chain,name,address}], items:[{k(nameKey), n, barcode, product, byStore:{
-  storeKey:price}, candidates}]}`. Keyed by **nameKey** so the app crosses its list items
-  against it directly. `nameKeyOf` is duplicated in the script — keep it in sync with
-  `lib/categories.ts`.
+  Firestore doc) via unauthenticated REST, resolves barcodes ONCE (a barcode is national),
+  fetches portal prices **per tracked city**, and force-pushes a compact `prices.json` to the
+  orphan `data` branch using the built-in `github.token` — **no service-account key, no
+  secret**. Shape: `{updatedAt, cities:[...], byCity:{<city>:{city, stores:[{key,chain,name,
+  address}], items:[{k(nameKey), n, barcode, product, byStore:{storeKey:price}, candidates}]}},
+  ...}` plus a top-level single-city mirror (`city/stores/items` = first city) for older app
+  builds. Keyed by **nameKey** so the app crosses its list items directly. `nameKeyOf` is
+  duplicated in the script — keep it in sync with `lib/categories.ts`.
 - `config/trackedProducts` is the one publicly-readable Firestore doc (rules: `read: if
-  true`, `write: if allowed()`): `{products:[{k,n}], pins:{nameKey:barcode}}`. `usePrices`
-  merge-writes `products` (the current list, debounced) and `pins` (user overrides) as
-  **separate fields** so a list change never clobbers pins.
-- **App side** (all built): `usePrices` (fetches `prices.json` from raw.githubusercontent —
-  CORS `*`, 5-min cache; syncs trackedProducts; `pinProduct`), `rankBasket` in `lib/prices.ts`
-  (pure; **coverage first, then price** — a branch missing basket items shows a low total but
-  isn't cheaper; a leading integer in an item's qty is a multiplier), and `PriceCheckSheet`
-  (the 💰 header button). New items are priced only after the next nightly run.
+  true`, `write: if allowed()`): `{products:[{k,n}], pins:{nameKey:barcode}, cities:[...]}`.
+  `usePrices` merge-writes `products` (the current list, debounced), `pins` (user overrides)
+  and `cities` (arrayUnion/Remove) as **separate fields** so changing one never clobbers the
+  others. Seeded with `cities:["חיפה"]`; a new city takes effect on the next run.
+- **App side** (`lib/prices.ts`: `fetchPriceData`, `availableCities`, `cityData` → a
+  per-city `PriceSlice`, `rankBasket(active, slice)` — pure, **coverage first then price**,
+  qty leading-integer as multiplier). `usePrices` owns the snapshot fetch (raw.githubusercontent,
+  CORS `*`, 5-min cache), the tracked-list sync, the selected city (localStorage `priceCity`),
+  and `addCity`. `PriceCheckSheet` (💰 header button): city switcher, ranking, and per-store
+  **"אני בסופר"** → an in-aisle list with each product's price + scannable **EAN-13 barcode**
+  (`Barcode.tsx`). City picker list is `lib/cities.ts`.
 - Not built yet: pinning a specific product from the UI (`pinProduct`/`candidates` exist,
-  no picker), camera barcode scan, per-store totals shown inline on the list.
+  no picker), camera barcode scan, per-store totals inline on the main list.
 
 ## Firebase config gotchas
 

@@ -28,11 +28,40 @@ export interface PricedItem {
   candidates?: PriceCandidate[]
 }
 
-export interface PriceData {
-  city: string
-  updatedAt: string
+/** One city's worth of price data. */
+export interface PriceSlice {
+  city?: string
   stores: PriceStore[]
   items: PricedItem[]
+}
+
+export interface PriceData {
+  updatedAt: string
+  /** Cities present in this snapshot (new multi-city shape). */
+  cities?: string[]
+  byCity?: Record<string, PriceSlice>
+  /** Back-compat single-city mirror (older snapshots and the default city). */
+  city?: string
+  stores?: PriceStore[]
+  items?: PricedItem[]
+}
+
+/** Cities the snapshot has data for. */
+export function availableCities(data: PriceData | null): string[] {
+  if (!data) return []
+  if (data.cities?.length) return data.cities
+  if (data.byCity) return Object.keys(data.byCity)
+  return data.city ? [data.city] : []
+}
+
+/** The price slice for one city, or null if the snapshot has no such city. */
+export function cityData(data: PriceData | null, city: string): PriceSlice | null {
+  if (!data) return null
+  if (data.byCity?.[city]) return data.byCity[city]
+  if (data.stores && data.items && (data.city === city || !data.city)) {
+    return { city: data.city, stores: data.stores, items: data.items }
+  }
+  return null
 }
 
 const PRICES_URL = 'https://raw.githubusercontent.com/ofekSro/kniot/data/prices.json'
@@ -47,16 +76,12 @@ export async function fetchPriceData(bust = false): Promise<PriceData | null> {
     const url = bust ? `${PRICES_URL}?t=${Date.now()}` : PRICES_URL
     const res = await fetch(url, { cache: bust ? 'no-store' : 'default' })
     if (!res.ok) return null
-    const data: unknown = await res.json()
-    if (
-      !data ||
-      typeof data !== 'object' ||
-      !Array.isArray((data as PriceData).stores) ||
-      !Array.isArray((data as PriceData).items)
-    ) {
-      return null
-    }
-    return data as PriceData
+    const data = (await res.json()) as PriceData | null
+    if (!data || typeof data !== 'object') return null
+    const hasSingle = Array.isArray(data.stores) && Array.isArray(data.items)
+    const hasMulti = data.byCity && typeof data.byCity === 'object'
+    if (!hasSingle && !hasMulti) return null
+    return data
   } catch {
     return null
   }
@@ -113,14 +138,14 @@ function qtyMultiplier(qty: string | null | undefined): number {
  */
 export function rankBasket(
   active: readonly { name: string; qty: string | null }[],
-  data: PriceData | null,
+  slice: PriceSlice | null,
 ): Ranking {
-  if (!data) {
+  if (!slice) {
     return { stores: [], items: [], basketCount: active.length, pricedCount: 0 }
   }
 
-  const itemByKey = new Map(data.items.map((it) => [it.k, it]))
-  const storeByKey = new Map(data.stores.map((s) => [s.key, s]))
+  const itemByKey = new Map(slice.items.map((it) => [it.k, it]))
+  const storeByKey = new Map(slice.stores.map((s) => [s.key, s]))
 
   const basket = active.map((a) => {
     const key = nameKeyOf(a.name)
@@ -130,7 +155,7 @@ export function rankBasket(
     (b) => b.priced && Object.keys(b.priced.byStore).length > 0,
   )
 
-  const stores: StoreRank[] = data.stores
+  const stores: StoreRank[] = slice.stores
     .map((store) => {
       let total = 0
       let covered = 0
@@ -171,8 +196,7 @@ export function rankBasket(
   })
 
   return {
-    city: data.city,
-    updatedAt: data.updatedAt,
+    city: slice.city,
     stores,
     items,
     basketCount: active.length,

@@ -24,11 +24,11 @@ jobs:
 
       - name: Fetch prices for tracked products
         env:
-          CITY: חיפה
+          # Cities come from config/trackedProducts (the app manages them);
+          # the fetcher falls back to Haifa if none are set.
           TRACKED_URL: https://firestore.googleapis.com/v1/projects/kniot-1299d/databases/(default)/documents/config/trackedProducts
         run: |
           node scripts/fetchPrices.mjs \
-            --city "$CITY" \
             --tracked-url "$TRACKED_URL" \
             --out public_data
           echo "--- output size ---"
