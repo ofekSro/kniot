@@ -4,26 +4,23 @@
  * Two data sources, each used for what it does cleanly:
  *
  *   1. chp.co.il autocomplete → turns the couple's GENERIC item names ("חלב")
- *      into a concrete product barcode + a few candidates. This endpoint returns
- *      clean JSON. (chp's price-comparison page is NOT used: after the first
- *      request per IP it CSS-obfuscates the results — decoy chars, split spans —
- *      which corrupts even the prices, so it is unusable for automated fetching.)
+ *      into a concrete product barcode + a few candidates. Clean JSON. (chp's
+ *      price-comparison page is NOT used: it CSS-obfuscates results after the
+ *      first request per IP, corrupting even the prices.)
  *
  *   2. The government price-transparency portals → the actual per-branch prices,
- *      as clean XML with no obfuscation. Shufersal's public portal plus the
- *      Cerberus portal (publishedprices.co.il) for the chains below, matched to
- *      the resolved barcodes.
+ *      as clean XML. Shufersal's public portal + the Cerberus portal
+ *      (publishedprices.co.il) for the chains in CERBERUS_CHAINS.
  *
- * The ranking of a basket is basket-dependent and stays client-side (coverage
- * first, then price) — see src/lib/prices.ts. This job only produces the compact
- * price-per-branch table, keyed by the app's nameKey so the app can cross its
- * list items against it directly.
+ * Barcodes are national, so they are resolved ONCE; prices are fetched per city.
+ * To stay fast across many cities we: fetch Shufersal's branch dropdown once,
+ * log in to each Cerberus chain once (caching its file listings), then download
+ * every branch's price file across all cities with bounded concurrency.
  *
- * Local probe (no Firestore):
- *   node scripts/fetchPrices.mjs --city חיפה --products "חלב,לחם אחיד,ביצים L" --out scripts/out
- *
- * In CI the product list comes from the public config/trackedProducts doc:
- *   node scripts/fetchPrices.mjs --city חיפה --tracked-url <REST url> --out public_data
+ * Local probe:
+ *   node scripts/fetchPrices.mjs --cities "חיפה,תל אביב" --products "חלב,קפה" --out scripts/out
+ * In CI the products + cities come from the public config/trackedProducts doc:
+ *   node scripts/fetchPrices.mjs --tracked-url <REST url> --out public_data
  *
  * Node >= 20, zero dependencies.
  */
@@ -34,16 +31,15 @@ import { pathToFileURL } from 'node:url'
 
 const UA = 'Mozilla/5.0 (compatible; kniot-price-bot)'
 const CHP = 'https://chp.co.il'
+const CONCURRENCY = 12
 
-/** Cerberus-portal chains worth having in Haifa. username -> display name. */
+/** Cerberus-portal chains worth having. username -> display name. */
 export const CERBERUS_CHAINS = {
   RamiLevi: 'רמי לוי',
   osherad: 'אושר עד',
   yohananof: 'יוחננוף',
   TivTaam: 'טיב טעם',
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // ---------------------------------------------------------------- helpers
 
@@ -59,6 +55,20 @@ export function nameKeyOf(name) {
     .replace(/\s+/g, ' ')
     .replace(/\//g, '-')
     .slice(0, 200)
+}
+
+/** Run `fn` over items with at most `limit` in flight at once. */
+async function mapLimit(items, limit, fn) {
+  let i = 0
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++
+      await fn(items[idx], idx)
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker),
+  )
 }
 
 function unescapeHtml(s) {
@@ -86,21 +96,22 @@ function tag(block, name) {
   return m ? m[1].trim() : ''
 }
 
-function parseItems(xml) {
+/**
+ * Pull only the wanted barcodes out of a price file. Instead of regex-scanning
+ * every <Item> (tens of thousands per file), jump straight to each wanted code
+ * with indexOf and read the ItemPrice in its surrounding <Item> block.
+ */
+function parseWanted(xml, wanted) {
   const out = []
-  for (const m of xml.matchAll(/<Item[ >]([\s\S]*?)<\/Item>/g)) {
-    const b = m[1]
-    const code = tag(b, 'ItemCode')
-    const price = Number.parseFloat(tag(b, 'ItemPrice'))
-    if (!code || !Number.isFinite(price)) continue
-    out.push({
-      code,
-      name: tag(b, 'ItemName'),
-      price,
-      unitQty: tag(b, 'UnitQty'),
-      qty: tag(b, 'Quantity'),
-      unitPrice: Number.parseFloat(tag(b, 'UnitOfMeasurePrice')) || null,
-    })
+  for (const code of wanted) {
+    const at = xml.indexOf(`<ItemCode>${code}</ItemCode>`)
+    if (at === -1) continue
+    const start = xml.lastIndexOf('<Item', at)
+    const end = xml.indexOf('</Item>', at)
+    if (end === -1) continue
+    const block = xml.slice(start === -1 ? at : start, end)
+    const price = Number.parseFloat(tag(block, 'ItemPrice'))
+    if (Number.isFinite(price)) out.push({ code, price })
   }
   return out
 }
@@ -125,11 +136,7 @@ async function fetchBytes(url, init = {}) {
 
 // ---------------------------------------------------------------- chp search
 
-/**
- * Resolve a generic name (or a barcode) to candidate products via chp's
- * autocomplete. `id` is "<manufacturer>_<barcode>"; we keep the trailing barcode.
- * Returns [{ name, barcode }], numeric barcodes only.
- */
+/** Resolve a term (product name or barcode) to candidate products via chp. */
 export async function chpAutocomplete(term) {
   const arr = JSON.parse(
     await fetchText(`${CHP}/autocompletion/product_extended?term=${encodeURIComponent(term)}`),
@@ -142,29 +149,26 @@ export async function chpAutocomplete(term) {
 
 // ---------------------------------------------------------------- Shufersal
 
-/** Branch registry comes from the portal page's store dropdown. */
-export async function shufersalBranches(city) {
+/** All branches from the portal's store dropdown (fetched once). */
+export async function shufersalOptions() {
   const html = await fetchText('https://prices.shufersal.co.il/')
   const out = []
   for (const m of html.matchAll(/<option value="(\d+)">([^<]+)<\/option>/g)) {
-    const id = m[1]
+    if (m[1] === '0') continue
+    // Labels look like "4 - שלי חיפה- כרמל"; drop the leading store-id prefix.
     const label = unescapeHtml(m[2])
-    if (id !== '0' && label.includes(city)) {
-      // Labels look like "4 - שלי חיפה- כרמל"; drop the leading store-id prefix.
-      const name = label.replace(/^\d+\s*-\s*/, '')
-      out.push({ chain: 'shufersal', chainName: 'שופרסל', id, name })
-    }
+    out.push({ id: m[1], label, name: label.replace(/^\d+\s*-\s*/, '') })
   }
   return out
 }
 
-export async function shufersalPriceFull(branchId) {
+async function shufersalPriceXml(branchId) {
   const html = await fetchText(
     `https://prices.shufersal.co.il/FileObject/UpdateCategory?catID=2&storeId=${branchId}&sort=Time&sortdir=DESC`,
   )
   const m = html.match(/"(https?:\/\/[^"]*blob\.core\.windows\.net[^"]*)"/)
   if (!m) throw new Error(`no PriceFull link for shufersal ${branchId}`)
-  return parseItems(decodePortalFile(await fetchBytes(unescapeHtml(m[1]))))
+  return decodePortalFile(await fetchBytes(unescapeHtml(m[1])))
 }
 
 // ---------------------------------------------------------------- Cerberus
@@ -174,6 +178,8 @@ class Cerberus {
     this.username = username
     this.cookie = ''
     this.token = ''
+    this.priceFiles = []
+    this.storesXml = ''
   }
 
   async login() {
@@ -194,18 +200,14 @@ class Cerberus {
         'Content-Type': 'application/x-www-form-urlencoded',
         Referer: 'https://url.publishedprices.co.il/login',
       },
-      body: new URLSearchParams({
-        username: this.username,
-        password: '',
-        csrftoken: this.token,
-      }),
+      body: new URLSearchParams({ username: this.username, password: '', csrftoken: this.token }),
       redirect: 'manual',
     })
     const fresh = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0])
     if (fresh.length) this.cookie = fresh.join('; ')
 
-    // The login rotates the session, which invalidates the pre-login CSRF
-    // token — the working one lives in the post-login file page's meta tag.
+    // The login rotates the session, invalidating the pre-login CSRF token —
+    // the working one lives in the post-login file page's meta tag.
     const filePage = await fetchText('https://url.publishedprices.co.il/file', {
       headers: { Cookie: this.cookie },
     })
@@ -215,33 +217,31 @@ class Cerberus {
   async list(search) {
     const res = await fetchText('https://url.publishedprices.co.il/file/json/dir', {
       method: 'POST',
-      headers: {
-        Cookie: this.cookie,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        sSearch: search,
-        iDisplayLength: '100000',
-        csrftoken: this.token,
-      }),
+      headers: { Cookie: this.cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ sSearch: search, iDisplayLength: '100000', csrftoken: this.token }),
     })
     return (JSON.parse(res).aaData ?? []).map((r) => r.fname)
   }
 
-  async download(fname) {
+  download(fname) {
     return fetchBytes(`https://url.publishedprices.co.il/file/d/${fname}`, {
       headers: { Cookie: this.cookie },
     })
   }
 
-  /** City branches from the chain's Stores file. */
-  async branches(city) {
+  /** Log in once and cache the Stores XML + the PriceFull file listing. */
+  async ready() {
+    await this.login()
+    this.priceFiles = await this.list('PriceFull')
     const files = await this.list('Stores')
     const storesFile = files.find((f) => /^Stores/i.test(f))
-    if (!storesFile) return []
-    const xml = decodePortalFile(await this.download(storesFile))
+    this.storesXml = storesFile ? decodePortalFile(await this.download(storesFile)) : ''
+  }
+
+  /** City branches from the cached Stores file. */
+  branchesForCity(city) {
     const out = []
-    for (const m of xml.matchAll(/<Store>([\s\S]*?)<\/Store>/g)) {
+    for (const m of this.storesXml.matchAll(/<Store>([\s\S]*?)<\/Store>/g)) {
       const b = m[1]
       const hay = tag(b, 'City') + tag(b, 'Address') + tag(b, 'StoreName')
       if (!hay.includes(city)) continue
@@ -256,16 +256,15 @@ class Cerberus {
     return out
   }
 
-  /** Store id is the third dash-segment of Cerberus PriceFull filenames. */
-  async priceFull(branchId) {
+  /** Price XML for a branch, using the cached PriceFull listing. */
+  async priceXml(branchId) {
     const padded = branchId.padStart(3, '0')
-    const files = await this.list('PriceFull')
-    const f = files
+    const f = this.priceFiles
       .filter((x) => x.split('-')[2] === padded)
       .sort()
       .pop()
     if (!f) throw new Error(`no PriceFull for ${this.username} branch ${branchId}`)
-    return parseItems(decodePortalFile(await this.download(f)))
+    return decodePortalFile(await this.download(f))
   }
 }
 
@@ -291,71 +290,11 @@ async function readTracked(url) {
   return { products, pins, cities }
 }
 
-/** Portal prices for ONE city, filtered to the wanted barcodes. */
-async function fetchCityPrices(city, wantedBarcodes, chains, maxBranches, failures) {
-  const stores = [] // { key, chain, name, address }
-  const priceByBarcode = {} // barcode -> { storeKey: price }
-
-  const collect = (branch, items) => {
-    const key = `${branch.chain}-${branch.id}`
-    stores.push({
-      key,
-      chain: branch.chainName,
-      name: branch.name || branch.id,
-      address: branch.address ?? '',
-    })
-    for (const it of items) {
-      if (!wantedBarcodes.has(it.code)) continue
-      priceByBarcode[it.code] ??= {}
-      const prev = priceByBarcode[it.code][key]
-      if (prev == null || it.price < prev) priceByBarcode[it.code][key] = it.price
-    }
-    console.log(`  ✓ [${city}] ${branch.chainName} ${branch.name || branch.id}: ${items.length} items`)
-  }
-
-  if (chains.includes('shufersal') && wantedBarcodes.size) {
-    try {
-      const list = (await shufersalBranches(city)).slice(0, maxBranches)
-      console.log(`[${city}] shufersal: ${list.length} branches`)
-      for (const b of list) {
-        try {
-          collect(b, await shufersalPriceFull(b.id))
-        } catch (e) {
-          failures.push(`${city} shufersal ${b.id}: ${e.message}`)
-        }
-      }
-    } catch (e) {
-      failures.push(`${city} shufersal: ${e.message}`)
-    }
-  }
-
-  for (const user of chains.filter((c) => c in CERBERUS_CHAINS)) {
-    if (!wantedBarcodes.size) break
-    try {
-      const portal = new Cerberus(user)
-      await portal.login()
-      const list = (await portal.branches(city)).slice(0, maxBranches)
-      console.log(`[${city}] ${user}: ${list.length} branches`)
-      for (const b of list) {
-        try {
-          collect(b, await portal.priceFull(b.id))
-        } catch (e) {
-          failures.push(`${city} ${user} ${b.id}: ${e.message}`)
-        }
-      }
-    } catch (e) {
-      failures.push(`${city} ${user}: ${e.message}`)
-    }
-  }
-
-  return { stores, priceByBarcode }
-}
-
 /** Turn tracked product names into { barcode -> {k, n, product, candidates} }. */
 async function resolveBarcodes(products, pins) {
-  const wanted = new Map() // barcode -> meta
+  const wanted = new Map()
   const failures = []
-  for (const p of products) {
+  await mapLimit(products, 6, async (p) => {
     const k = p.k || nameKeyOf(p.n)
     try {
       const pinned = pins[k]
@@ -363,16 +302,15 @@ async function resolveBarcodes(products, pins) {
       const barcode = pinned || candidates[0]?.barcode
       if (!barcode) {
         failures.push(`${p.n}: no matching product`)
-        continue
+        return
       }
       const product =
         candidates.find((c) => c.barcode === barcode)?.name ?? candidates[0]?.name ?? p.n
       wanted.set(barcode, { k, n: p.n, product, candidates })
-      await sleep(150)
     } catch (e) {
       failures.push(`${p.n}: ${e.message}`)
     }
-  }
+  })
   return { wanted, failures }
 }
 
@@ -388,19 +326,13 @@ async function main() {
     .split(',')
     .filter(Boolean)
 
-  // Product list: --products "name,name" locally, else the public Firestore doc.
   let products = (opt('products', '') || '')
     .split(',')
     .map((n) => n.trim())
     .filter(Boolean)
     .map((n) => ({ k: nameKeyOf(n), n }))
   let pins = {}
-
-  // Cities: --city X (single) / --cities "X,Y", else the tracked doc, else Haifa.
-  let cities = (opt('cities', '') || '')
-    .split(',')
-    .map((c) => c.trim())
-    .filter(Boolean)
+  let cities = (opt('cities', '') || '').split(',').map((c) => c.trim()).filter(Boolean)
   const singleCity = opt('city', '')
   if (singleCity) cities.unshift(singleCity)
 
@@ -415,39 +347,87 @@ async function main() {
   if (cities.length === 0) cities = ['חיפה']
   cities = [...new Set(cities)]
 
-  // Resolve names → barcodes ONCE (a barcode is national; only prices vary by city).
   const { wanted, failures: resolveFailures } = await resolveBarcodes(products, pins)
   const wantedBarcodes = new Set(wanted.keys())
-  console.log(
-    `resolved ${wantedBarcodes.size}/${products.length} products; cities: ${cities.join(', ')}`,
-  )
+  console.log(`resolved ${wantedBarcodes.size}/${products.length} products; cities: ${cities.length}`)
 
   mkdirSync(outDir, { recursive: true })
   const failures = [...resolveFailures]
-  const byCity = {}
 
-  for (const city of cities) {
-    const { stores, priceByBarcode } = await fetchCityPrices(
-      city,
-      wantedBarcodes,
-      chains,
-      maxBranches,
-      failures,
-    )
-    const items = []
-    for (const [barcode, meta] of wanted) {
-      items.push({
-        k: meta.k,
-        n: meta.n,
-        barcode,
-        product: meta.product,
-        byStore: priceByBarcode[barcode] ?? {},
-        candidates: meta.candidates,
-      })
+  // Per-city accumulators.
+  const acc = {}
+  for (const city of cities) acc[city] = { stores: [], priceByBarcode: {} }
+
+  // Gather every branch download across all cities into one task list.
+  const tasks = [] // { city, branch, run: () => Promise<xml> }
+
+  if (chains.includes('shufersal') && wantedBarcodes.size) {
+    try {
+      const opts = await shufersalOptions()
+      for (const city of cities) {
+        for (const o of opts.filter((x) => x.label.includes(city)).slice(0, maxBranches)) {
+          const branch = { chain: 'shufersal', chainName: 'שופרסל', id: o.id, name: o.name }
+          tasks.push({ city, branch, run: () => shufersalPriceXml(o.id) })
+        }
+      }
+    } catch (e) {
+      failures.push(`shufersal dropdown: ${e.message}`)
     }
-    byCity[city] = { city, stores, items }
+  }
+
+  for (const user of chains.filter((c) => c in CERBERUS_CHAINS)) {
+    if (!wantedBarcodes.size) break
+    try {
+      const portal = new Cerberus(user)
+      await portal.ready() // login + listings ONCE per chain
+      for (const city of cities) {
+        for (const b of portal.branchesForCity(city).slice(0, maxBranches)) {
+          tasks.push({ city, branch: b, run: () => portal.priceXml(b.id) })
+        }
+      }
+    } catch (e) {
+      failures.push(`${user}: ${e.message}`)
+    }
+  }
+
+  console.log(`downloading ${tasks.length} branch files (concurrency ${CONCURRENCY})…`)
+  let done = 0
+  await mapLimit(tasks, CONCURRENCY, async (t) => {
+    try {
+      const items = parseWanted(await t.run(), wantedBarcodes)
+      const slice = acc[t.city]
+      const key = `${t.branch.chain}-${t.branch.id}`
+      slice.stores.push({
+        key,
+        chain: t.branch.chainName,
+        name: t.branch.name || t.branch.id,
+        address: t.branch.address ?? '',
+      })
+      for (const it of items) {
+        slice.priceByBarcode[it.code] ??= {}
+        const prev = slice.priceByBarcode[it.code][key]
+        if (prev == null || it.price < prev) slice.priceByBarcode[it.code][key] = it.price
+      }
+    } catch (e) {
+      failures.push(`${t.city} ${t.branch.chainName} ${t.branch.id}: ${e.message}`)
+    }
+    if (++done % 50 === 0) console.log(`  …${done}/${tasks.length}`)
+  })
+
+  const byCity = {}
+  for (const city of cities) {
+    const slice = acc[city]
+    const items = [...wanted].map(([barcode, meta]) => ({
+      k: meta.k,
+      n: meta.n,
+      barcode,
+      product: meta.product,
+      byStore: slice.priceByBarcode[barcode] ?? {},
+      candidates: meta.candidates,
+    }))
+    byCity[city] = { city, stores: slice.stores, items }
     const priced = items.filter((it) => Object.keys(it.byStore).length).length
-    console.log(`[${city}] branches: ${stores.length} | priced: ${priced}/${items.length}`)
+    console.log(`[${city}] branches: ${slice.stores.length} | priced: ${priced}/${items.length}`)
   }
 
   const first = byCity[cities[0]]
@@ -463,36 +443,10 @@ async function main() {
   writeFileSync(join(outDir, 'prices.json'), JSON.stringify(payload))
   writeFileSync(
     join(outDir, 'branches.json'),
-    JSON.stringify(Object.fromEntries(cities.map((c) => [c, byCity[c].stores])), null, 1),
+    JSON.stringify(Object.fromEntries(cities.map((c) => [c, byCity[c].stores.length])), null, 1),
   )
-
-  if (failures.length) console.log('\nfailures:\n  ' + failures.join('\n  '))
-
-  const { stores, items } = first
-  if (items.length && stores.length) {
-    console.log(`\n--- ${first.city}: ranking (coverage first, then total) ---`)
-    const rank = stores
-      .map((s) => {
-        let total = 0
-        let covered = 0
-        for (const it of items) {
-          const price = it.byStore[s.key]
-          if (price != null) {
-            total += price
-            covered++
-          }
-        }
-        return { s, total, covered }
-      })
-      .filter((r) => r.covered)
-      .sort((a, b) => b.covered - a.covered || a.total - b.total)
-      .slice(0, 12)
-    for (const r of rank) {
-      console.log(
-        `${String(r.total.toFixed(2)).padStart(8)}  ${r.covered}/${items.length}  ${r.s.chain} ${r.s.name}`,
-      )
-    }
-  }
+  console.log(`\nwrote ${cities.length} cities, ${tasks.length} branches`)
+  if (failures.length) console.log(`failures: ${failures.length} (first 5)\n  ` + failures.slice(0, 5).join('\n  '))
 }
 
 // Run only when executed directly, so importing this module is side-effect-free.
