@@ -26,11 +26,12 @@ service cloud.firestore {
       allow read, write: if allowed();
     }
 
-    // The list of product barcodes the couple tracks for price comparison.
-    // Publicly READABLE on purpose: the nightly price job (a GitHub Action with
-    // no login) reads it to know which products to fetch. Barcodes are not
-    // sensitive. Writable only by allowed users (the app, when linking a product).
-    match /config/trackedBarcodes {
+    // The list of products the couple tracks for price comparison ({products:
+    // [{k,n}], pins: {nameKey: barcode}}). Publicly READABLE on purpose: the
+    // nightly price job (a GitHub Action with no login) reads it to know which
+    // products to price. Product names/barcodes are not sensitive. Writable only
+    // by allowed users (the app syncs the current list and any pinned product).
+    match /config/trackedProducts {
       allow read: if true;
       allow write: if allowed();
     }

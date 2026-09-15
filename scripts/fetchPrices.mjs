@@ -1,16 +1,30 @@
 /**
- * Nightly price fetcher — Israeli price-transparency portals.
+ * Nightly price fetcher for the basket-ranking feature.
  *
- * Downloads full price files for every branch in the configured city, from:
- *   - Shufersal's public portal (branch registry scraped from its dropdown)
- *   - The Cerberus portal (publishedprices.co.il) for the chains listed below,
- *     using the law-mandated public credentials
+ * Two data sources, each used for what it does cleanly:
+ *
+ *   1. chp.co.il autocomplete → turns the couple's GENERIC item names ("חלב")
+ *      into a concrete product barcode + a few candidates. This endpoint returns
+ *      clean JSON. (chp's price-comparison page is NOT used: after the first
+ *      request per IP it CSS-obfuscates the results — decoy chars, split spans —
+ *      which corrupts even the prices, so it is unusable for automated fetching.)
+ *
+ *   2. The government price-transparency portals → the actual per-branch prices,
+ *      as clean XML with no obfuscation. Shufersal's public portal plus the
+ *      Cerberus portal (publishedprices.co.il) for the chains below, matched to
+ *      the resolved barcodes.
+ *
+ * The ranking of a basket is basket-dependent and stays client-side (coverage
+ * first, then price) — see src/lib/prices.ts. This job only produces the compact
+ * price-per-branch table, keyed by the app's nameKey so the app can cross its
+ * list items against it directly.
  *
  * Local probe (no Firestore):
- *   node scripts/fetchPrices.mjs --city חיפה --max-branches 3 \
- *     --barcodes 7290000056845,7290000041445 --out scripts/out
+ *   node scripts/fetchPrices.mjs --city חיפה --products "חלב,לחם אחיד,ביצים L" --out scripts/out
  *
- * In CI the same fetch produces prices.json, published to GitHub Pages
+ * In CI the product list comes from the public config/trackedProducts doc:
+ *   node scripts/fetchPrices.mjs --city חיפה --tracked-url <REST url> --out public_data
+ *
  * Node >= 20, zero dependencies.
  */
 import { gunzipSync } from 'node:zlib'
@@ -19,6 +33,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const UA = 'Mozilla/5.0 (compatible; kniot-price-bot)'
+const CHP = 'https://chp.co.il'
 
 /** Cerberus-portal chains worth having in Haifa. username -> display name. */
 export const CERBERUS_CHAINS = {
@@ -28,7 +43,23 @@ export const CERBERUS_CHAINS = {
   TivTaam: 'טיב טעם',
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
 // ---------------------------------------------------------------- helpers
+
+/**
+ * Canonical key for a product name — MUST match nameKeyOf in
+ * src/lib/categories.ts, because the app crosses its list items against
+ * prices.json by this exact key.
+ */
+export function nameKeyOf(name) {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\//g, '-')
+    .slice(0, 200)
+}
 
 function unescapeHtml(s) {
   return s
@@ -92,6 +123,23 @@ async function fetchBytes(url, init = {}) {
   return Buffer.from(await res.arrayBuffer())
 }
 
+// ---------------------------------------------------------------- chp search
+
+/**
+ * Resolve a generic name (or a barcode) to candidate products via chp's
+ * autocomplete. `id` is "<manufacturer>_<barcode>"; we keep the trailing barcode.
+ * Returns [{ name, barcode }], numeric barcodes only.
+ */
+export async function chpAutocomplete(term) {
+  const arr = JSON.parse(
+    await fetchText(`${CHP}/autocompletion/product_extended?term=${encodeURIComponent(term)}`),
+  )
+  if (!Array.isArray(arr)) return []
+  return arr
+    .map((r) => ({ name: String(r.value ?? '').trim(), barcode: String(r.id ?? '').split('_').pop() }))
+    .filter((p) => p.name && /^\d{6,}$/.test(p.barcode))
+}
+
 // ---------------------------------------------------------------- Shufersal
 
 /** Branch registry comes from the portal page's store dropdown. */
@@ -102,7 +150,9 @@ export async function shufersalBranches(city) {
     const id = m[1]
     const label = unescapeHtml(m[2])
     if (id !== '0' && label.includes(city)) {
-      out.push({ chain: 'shufersal', chainName: 'שופרסל', id, name: label })
+      // Labels look like "4 - שלי חיפה- כרמל"; drop the leading store-id prefix.
+      const name = label.replace(/^\d+\s*-\s*/, '')
+      out.push({ chain: 'shufersal', chainName: 'שופרסל', id, name })
     }
   }
   return out
@@ -221,6 +271,48 @@ class Cerberus {
 
 // ---------------------------------------------------------------- main
 
+/** Read the public config/trackedProducts doc via unauthenticated REST. */
+async function readTracked(url) {
+  const doc = await (await fetch(url)).json()
+  const f = doc?.fields ?? {}
+  const products = (f.products?.arrayValue?.values ?? [])
+    .map((v) => {
+      const mf = v.mapValue?.fields ?? {}
+      return { k: mf.k?.stringValue ?? '', n: mf.n?.stringValue ?? '' }
+    })
+    .filter((p) => p.n)
+  const pins = {}
+  for (const [k, v] of Object.entries(f.pins?.mapValue?.fields ?? {})) {
+    if (v?.stringValue) pins[k] = v.stringValue
+  }
+  return { products, pins }
+}
+
+/** Turn tracked product names into { barcode -> {k, n, product, candidates} }. */
+async function resolveBarcodes(products, pins) {
+  const wanted = new Map() // barcode -> meta
+  const failures = []
+  for (const p of products) {
+    const k = p.k || nameKeyOf(p.n)
+    try {
+      const pinned = pins[k]
+      const candidates = (await chpAutocomplete(pinned || p.n)).slice(0, 6)
+      const barcode = pinned || candidates[0]?.barcode
+      if (!barcode) {
+        failures.push(`${p.n}: no matching product`)
+        continue
+      }
+      const product =
+        candidates.find((c) => c.barcode === barcode)?.name ?? candidates[0]?.name ?? p.n
+      wanted.set(barcode, { k, n: p.n, product, candidates })
+      await sleep(150)
+    } catch (e) {
+      failures.push(`${p.n}: ${e.message}`)
+    }
+  }
+  return { wanted, failures }
+}
+
 async function main() {
   const args = process.argv.slice(2)
   const opt = (name, dflt) => {
@@ -233,38 +325,50 @@ async function main() {
   const chains = opt('chains', `shufersal,${Object.keys(CERBERUS_CHAINS).join(',')}`)
     .split(',')
     .filter(Boolean)
-  let wantedBarcodes = (opt('barcodes', '') || '').split(',').filter(Boolean)
 
-  // In CI the barcode list comes from the public Firestore doc, not a flag.
+  // Product list: --products "name,name" locally, else the public Firestore doc.
+  let products = (opt('products', '') || '')
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean)
+    .map((n) => ({ k: nameKeyOf(n), n }))
+  let pins = {}
   const trackedUrl = opt('tracked-url', '')
-  if (trackedUrl && wantedBarcodes.length === 0) {
-    try {
-      const doc = await (await fetch(trackedUrl)).json()
-      const arr = doc?.fields?.codes?.arrayValue?.values ?? []
-      wantedBarcodes = arr.map((v) => v.stringValue).filter(Boolean)
-      console.log(`tracked barcodes from Firestore: ${wantedBarcodes.length}`)
-    } catch (e) {
-      console.log('could not read tracked barcodes:', e.message)
-    }
+  if (trackedUrl && products.length === 0) {
+    const tracked = await readTracked(trackedUrl)
+    products = tracked.products
+    pins = tracked.pins
+    console.log(`tracked products from Firestore: ${products.length}`)
   }
 
+  // Resolve names → barcodes up front, via chp autocomplete.
+  const { wanted, failures: resolveFailures } = await resolveBarcodes(products, pins)
+  const wantedBarcodes = new Set(wanted.keys())
+  console.log(`resolved ${wantedBarcodes.size}/${products.length} products to barcodes`)
+
   mkdirSync(outDir, { recursive: true })
-  const branches = []
-  const prices = {} // barcode -> { name, byBranch: { branchKey: price } }
-  const failures = []
+  const stores = [] // { key, chain, name, address }
+  const priceByBarcode = {} // barcode -> { storeKey: price }
+  const failures = [...resolveFailures]
 
   const collect = (branch, items) => {
     const key = `${branch.chain}-${branch.id}`
-    branches.push({ ...branch, key, items: items.length })
+    stores.push({
+      key,
+      chain: branch.chainName,
+      name: branch.name || branch.id,
+      address: branch.address ?? '',
+    })
     for (const it of items) {
-      if (wantedBarcodes.length && !wantedBarcodes.includes(it.code)) continue
-      prices[it.code] ??= { name: it.name, byBranch: {} }
-      prices[it.code].byBranch[key] = it.price
+      if (!wantedBarcodes.has(it.code)) continue
+      priceByBarcode[it.code] ??= {}
+      const prev = priceByBarcode[it.code][key]
+      if (prev == null || it.price < prev) priceByBarcode[it.code][key] = it.price
     }
     console.log(`  ✓ ${branch.chainName} ${branch.name || branch.id}: ${items.length} items`)
   }
 
-  if (chains.includes('shufersal')) {
+  if (chains.includes('shufersal') && wantedBarcodes.size) {
     try {
       const list = (await shufersalBranches(city)).slice(0, maxBranches)
       console.log(`shufersal: ${list.length} branches in ${city}`)
@@ -281,6 +385,7 @@ async function main() {
   }
 
   for (const user of chains.filter((c) => c in CERBERUS_CHAINS)) {
+    if (!wantedBarcodes.size) break
     try {
       const portal = new Cerberus(user)
       await portal.login()
@@ -298,27 +403,53 @@ async function main() {
     }
   }
 
-  writeFileSync(join(outDir, 'branches.json'), JSON.stringify(branches, null, 1))
-
-  // Compact payload the app fetches: branch registry + price-by-branch per barcode.
-  const published = {
+  // Compose the compact payload the app fetches, keyed by the app's nameKey.
+  const items = []
+  for (const [barcode, meta] of wanted) {
+    items.push({
+      k: meta.k,
+      n: meta.n,
+      barcode,
+      product: meta.product,
+      byStore: priceByBarcode[barcode] ?? {},
+      candidates: meta.candidates,
+    })
+  }
+  const payload = {
     city,
     updatedAt: new Date().toISOString(),
-    branches: branches.map(({ key, chainName, name, address, items }) => ({
-      key, chain: chainName, name, address: address ?? '', items,
-    })),
-    prices, // { barcode: { name, byBranch: { branchKey: price } } }
+    stores,
+    items,
   }
-  writeFileSync(join(outDir, 'prices.json'), JSON.stringify(published))
-  console.log(`\nbranches: ${branches.length} | tracked barcodes: ${Object.keys(prices).length}`)
+  writeFileSync(join(outDir, 'prices.json'), JSON.stringify(payload))
+  writeFileSync(join(outDir, 'branches.json'), JSON.stringify(stores, null, 1))
+
+  const pricedCount = items.filter((it) => Object.keys(it.byStore).length).length
+  console.log(`\nbranches: ${stores.length} | priced products: ${pricedCount}/${items.length}`)
   if (failures.length) console.log('failures:\n  ' + failures.join('\n  '))
 
-  if (wantedBarcodes.length) {
-    console.log('\n--- comparison ---')
-    const keys = branches.map((b) => b.key)
-    for (const [code, p] of Object.entries(prices)) {
-      const row = keys.map((k) => p.byBranch[k]?.toFixed(2) ?? '—').join('  ')
-      console.log(`${code} ${p.name.slice(0, 28).padEnd(30)} ${row}`)
+  if (items.length && stores.length) {
+    console.log('\n--- basket ranking (coverage first, then total) ---')
+    const rank = stores
+      .map((s) => {
+        let total = 0
+        let covered = 0
+        for (const it of items) {
+          const price = it.byStore[s.key]
+          if (price != null) {
+            total += price
+            covered++
+          }
+        }
+        return { s, total, covered }
+      })
+      .filter((r) => r.covered)
+      .sort((a, b) => b.covered - a.covered || a.total - b.total)
+      .slice(0, 12)
+    for (const r of rank) {
+      console.log(
+        `${String(r.total.toFixed(2)).padStart(8)}  ${r.covered}/${items.length}  ${r.s.chain} ${r.s.name}`,
+      )
     }
   }
 }

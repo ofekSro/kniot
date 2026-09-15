@@ -22,10 +22,10 @@ jobs:
         with:
           node-version: 22
 
-      - name: Fetch prices for tracked barcodes
+      - name: Fetch prices for tracked products
         env:
           CITY: חיפה
-          TRACKED_URL: https://firestore.googleapis.com/v1/projects/kniot-1299d/databases/(default)/documents/config/trackedBarcodes
+          TRACKED_URL: https://firestore.googleapis.com/v1/projects/kniot-1299d/databases/(default)/documents/config/trackedProducts
         run: |
           node scripts/fetchPrices.mjs \
             --city "$CITY" \

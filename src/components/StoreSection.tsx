@@ -26,7 +26,6 @@ export function StoreSection({
   onOpen,
 }: Props) {
   const [copied, setCopied] = useState(false)
-  const [chpCopied, setChpCopied] = useState(false)
   if (items.length === 0) return null
   const store = getStore(storeId)
 
@@ -71,25 +70,6 @@ export function StoreSection({
     }
   }
 
-  /**
-   * Chp has no API, so this is a bridge: copy the plain product names and open
-   * chp.co.il in a new tab — paste there to see which nearby branch is cheapest.
-   * Clipboard write must happen inside the tap gesture, so no awaits before it.
-   */
-  function checkInChp() {
-    const text = items.map((i) => i.name).join('\n')
-    navigator.clipboard
-      ?.writeText(text)
-      .then(() => {
-        setChpCopied(true)
-        window.setTimeout(() => setChpCopied(false), 2000)
-      })
-      .catch(() => {
-        // Clipboard blocked — Chp still opens and the user types instead.
-      })
-    window.open('https://chp.co.il', '_blank', 'noopener')
-  }
-
   return (
     <section className="mt-5 first:mt-1">
       <div className="flex items-center gap-2 rounded-2xl bg-band px-3 py-2">
@@ -100,17 +80,6 @@ export function StoreSection({
         <span className="rounded-full bg-card px-2 py-0.5 text-xs font-medium text-ink-muted">
           {items.length}
         </span>
-        {storeId === 'super' && (
-          <button
-            type="button"
-            onClick={checkInChp}
-            aria-label="העתקת הרשימה ופתיחת Chp להשוואת מחירים"
-            className="flex min-h-9 items-center gap-1.5 rounded-full bg-card px-3 text-sm font-medium text-ink-muted transition active:scale-95"
-          >
-            <span aria-hidden>💰</span>
-            <span>{chpCopied ? 'הועתק ✓' : 'בדיקה ב‑Chp'}</span>
-          </button>
-        )}
         <button
           type="button"
           onClick={() => void share()}

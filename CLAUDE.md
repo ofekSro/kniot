@@ -8,12 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 whitelisted Google accounts. Live at https://kniot-1299d.web.app (Firebase project
 `kniot-1299d`). The users communicate in Hebrew; all UI copy is Hebrew.
 
-**Not a git repository**, and the working directory lives inside OneDrive
-("OneDrive - Technion"). Consequences: there is no history to consult and no undo for
-destructive file operations — look before overwriting; OneDrive sync can transiently
-lock files (node_modules, dev-server output), so a mysterious EPERM/EBUSY is usually
-sync, not code. If the user ever wants git, `dist`, `.env*`, and the service-account
-key are already covered by the existing `.gitignore`.
+Git repo: `github.com/ofekSro/kniot` (public), `main` is deployed. A separate
+orphan `data` branch is machine-written by the price Action (see below) — never merge
+it. The working directory lives inside OneDrive ("OneDrive - Technion"): sync can
+transiently lock files (node_modules, dev-server output), so a mysterious EPERM/EBUSY is
+usually sync, not code. `gh` is not on PATH; auth here has used the GitHub device flow
+(client id `178c6fc778ccc68e1d6a`, scopes `repo,workflow`) with a portable `gh` binary
+or a token in a one-shot push URL — never persist a token in git config or a committed
+file.
 
 Stack is deliberately fixed: React 18 + Vite 7 + TypeScript (strict) + Tailwind v4
 (CSS-first, no tailwind.config) + Firebase (Google Auth, Firestore with persistent
@@ -29,6 +31,9 @@ Vite to 7 — plugin-react 6 requires Vite 8; don't "upgrade" these.
   firebase-admin (needs `service-account.json`). Seeding must bypass rules — clients can
   never create that doc.
 - `npm run icons` — regenerates PWA icons from the inline SVG in `scripts/generateIcons.mjs`.
+- `node scripts/fetchPrices.mjs --city חיפה --max-branches 3 --products "חלב,לחם אחיד,ביצים L" --out scripts/out`
+  — local probe of the price fetcher (zero deps, Node ≥20). In CI it runs with
+  `--tracked-url <public trackedProducts REST url>` instead of `--products`.
 - Deploy: `npx firebase-tools@15 deploy` (or `--only hosting`, `--only firestore:rules`,
   `--only auth`). The CLI is logged in on this machine; `.firebaserc` targets `kniot-1299d`.
 - No test framework by design. Verification convention used throughout: temporary
@@ -91,6 +96,45 @@ Vite to 7 — plugin-react 6 requires Vite 8; don't "upgrade" these.
 - **RTL only**: logical properties/classes exclusively (`ps-`/`pe-`/`ms-`/`me-`,
   `text-start`, `border-inline-start`). Touch targets ≥44px (`min-h-11`+).
   `Sheet.tsx` is the shared bottom-sheet shell for all sheets.
+
+## Price pipeline ("איפה הכי זול" — the 💰 button)
+
+Goal: rank Haifa supermarket branches by the couple's actual basket, to save money.
+Deliberately **serverless and credential-free**. Two data sources, each used for what
+it does *cleanly* (`scripts/fetchPrices.mjs`):
+
+- **chp.co.il autocomplete → barcode.** The couple's items are generic ("חלב"), so each
+  is resolved to a concrete product barcode via `/autocompletion/product_extended` (clean
+  JSON, top hit unless a barcode is pinned). **Do NOT use chp's `compare_results` page for
+  prices**: after the first request per IP it CSS-obfuscates the results — text split
+  across spans/divs with decoy digits/letters + zero-width chars — which corrupts even the
+  prices and needs its randomized per-response CSS to undo. Autocomplete is not obfuscated.
+- **Government price-transparency portals → prices** (clean XML). **Shufersal** (public;
+  branches from the store dropdown; PriceFull off `FileObject/UpdateCategory`; store name
+  label has a `"<id> - "` prefix, stripped) and **Cerberus** (`url.publishedprices.co.il`,
+  law-mandated public logins per chain in `CERBERUS_CHAINS`). Cerberus gotchas handled: the
+  login **rotates the CSRF token** (re-read from `/file` after login), store files are
+  **UTF-16**, branch id is the third dash-segment of `PriceFull` filenames. Haifa: Shufersal
+  + Rami Levy + Osher Ad return data; yohananof/TivTaam have no Haifa branch.
+- `.github/workflows/prices.yml` runs nightly: reads `config/trackedProducts` (the public
+  Firestore doc) via unauthenticated REST, resolves barcodes, fetches portal prices, and
+  force-pushes a compact `prices.json` to the orphan `data` branch using the built-in
+  `github.token` — **no service-account key, no secret**. Shape: `{city, updatedAt,
+  stores:[{key,chain,name,address}], items:[{k(nameKey), n, barcode, product, byStore:{
+  storeKey:price}, candidates}]}`. Keyed by **nameKey** so the app crosses its list items
+  against it directly. `nameKeyOf` is duplicated in the script — keep it in sync with
+  `lib/categories.ts`.
+- `config/trackedProducts` is the one publicly-readable Firestore doc (rules: `read: if
+  true`, `write: if allowed()`): `{products:[{k,n}], pins:{nameKey:barcode}}`. `usePrices`
+  merge-writes `products` (the current list, debounced) and `pins` (user overrides) as
+  **separate fields** so a list change never clobbers pins.
+- **App side** (all built): `usePrices` (fetches `prices.json` from raw.githubusercontent —
+  CORS `*`, 5-min cache; syncs trackedProducts; `pinProduct`), `rankBasket` in `lib/prices.ts`
+  (pure; **coverage first, then price** — a branch missing basket items shows a low total but
+  isn't cheaper; a leading integer in an item's qty is a multiplier), and `PriceCheckSheet`
+  (the 💰 header button). New items are priced only after the next nightly run.
+- Not built yet: pinning a specific product from the UI (`pinProduct`/`candidates` exist,
+  no picker), camera barcode scan, per-store totals shown inline on the list.
 
 ## Firebase config gotchas
 

@@ -7,6 +7,7 @@ import { useHistory } from '../hooks/useHistory'
 import { useFavorites } from '../hooks/useFavorites'
 import { useOnline } from '../hooks/useOnline'
 import { useAppTitle } from '../hooks/useAppTitle'
+import { usePrices } from '../hooks/usePrices'
 import { AddBar } from './AddBar'
 import { EditableTitle } from './EditableTitle'
 import { CategoryGroup } from './CategoryGroup'
@@ -14,6 +15,7 @@ import { StoreSection } from './StoreSection'
 import { BoughtSection } from './BoughtSection'
 import { EditSheet } from './EditSheet'
 import { FavoritesSheet } from './FavoritesSheet'
+import { PriceCheckSheet } from './PriceCheckSheet'
 import { Settings } from './Settings'
 import { OfflineBanner } from './OfflineBanner'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -46,6 +48,12 @@ export function ListScreen({ user, onSignOut }: Props) {
     setBought,
     finishShopping,
   } = useItems()
+  const {
+    data: priceData,
+    loading: pricesLoading,
+    refreshing: pricesRefreshing,
+    refresh: refreshPrices,
+  } = usePrices(active)
 
   const [splitByStore, setSplitByStore] = useState(() => {
     try {
@@ -67,6 +75,7 @@ export function ListScreen({ user, onSignOut }: Props) {
 
   const [editing, setEditing] = useState<Item | null>(null)
   const [favoritesOpen, setFavoritesOpen] = useState(false)
+  const [priceOpen, setPriceOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [confirmFinish, setConfirmFinish] = useState(false)
   const [highlightedId, setHighlightedId] = useState<string | null>(null)
@@ -191,6 +200,14 @@ export function ListScreen({ user, onSignOut }: Props) {
         </button>
         <button
           type="button"
+          onClick={() => setPriceOpen(true)}
+          aria-label="השוואת מחירים — איפה הכי זול"
+          className="flex size-11 items-center justify-center rounded-full text-xl transition active:bg-track"
+        >
+          <span aria-hidden>💰</span>
+        </button>
+        <button
+          type="button"
           onClick={() => setSettingsOpen(true)}
           aria-label="הגדרות"
           className="flex size-11 items-center justify-center rounded-full transition active:bg-track"
@@ -305,6 +322,16 @@ export function ListScreen({ user, onSignOut }: Props) {
         onAddAll={addAllFavorites}
         onRename={renameFavorite}
         onRemove={removeFavorite}
+      />
+
+      <PriceCheckSheet
+        open={priceOpen}
+        onClose={() => setPriceOpen(false)}
+        active={active}
+        data={priceData}
+        loading={pricesLoading}
+        refreshing={pricesRefreshing}
+        onRefresh={() => void refreshPrices()}
       />
 
       <Settings
