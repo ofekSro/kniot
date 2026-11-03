@@ -31,8 +31,9 @@ Vite to 7 — plugin-react 6 requires Vite 8; don't "upgrade" these.
   firebase-admin (needs `service-account.json`). Seeding must bypass rules — clients can
   never create that doc.
 - `npm run icons` — regenerates PWA icons from the inline SVG in `scripts/generateIcons.mjs`.
-- `node scripts/fetchPrices.mjs --city חיפה --max-branches 3 --products "חלב,לחם אחיד,ביצים L" --out scripts/out`
-  — local probe of the price fetcher (zero deps, Node ≥20). In CI it runs with
+- `node scripts/fetchPrices.mjs --city חיפה --max-branches 3 --products "חלב,עגבניה,ביצים L" --out scripts/out`
+  — local probe of the price fetcher (zero deps, Node ≥20; ~1 min for 2 branches × 13
+  chains). `--chains shufersal,RamiLevi` limits portals. In CI it runs with
   `--tracked-url <public trackedProducts REST url>` instead of `--products`.
 - Deploy: `npx firebase-tools@15 deploy` (or `--only hosting`, `--only firestore:rules`,
   `--only auth`). The CLI is logged in on this machine; `.firebaserc` targets `kniot-1299d`.
@@ -109,25 +110,49 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
   prices**: after the first request per IP it CSS-obfuscates the results — text split
   across spans/divs with decoy digits/letters + zero-width chars — which corrupts even the
   prices and needs its randomized per-response CSS to undo. Autocomplete is not obfuscated.
-- **Government price-transparency portals → prices** (clean XML). **Shufersal** (public;
-  branches from the store dropdown; PriceFull off `FileObject/UpdateCategory`; store name
-  label has a `"<id> - "` prefix, stripped) and **Cerberus** (`url.publishedprices.co.il`,
-  law-mandated public logins per chain in `CERBERUS_CHAINS`). Cerberus gotchas handled: the
-  login **rotates the CSRF token** (re-read from `/file` after login), store files are
-  **UTF-16**, branch id is the third dash-segment of `PriceFull` filenames. Haifa: Shufersal
-  + Rami Levy + Osher Ad return data; yohananof/TivTaam have no Haifa branch.
+- **Government price-transparency portals → prices** (clean XML, one standard schema).
+  **Shufersal** (branches from the store dropdown; PriceFull off `FileObject/UpdateCategory`;
+  label has a `"<id> - "` prefix, stripped), **Cerberus** (`url.publishedprices.co.il`,
+  law-mandated password-less public logins per chain in `CERBERUS_CHAINS`: Rami Levy, Osher
+  Ad, Yohananof, Tiv Taam, Fresh Market, Dor Alon, Keshet, Salach Dabach, Politzer, Stop
+  Market), **Carrefour** (`prices.carrefour.co.il` embeds `const files=[…]`/`const path`;
+  files at `/<path>/<name>`) and **Hazi Hinam** (`shop.hazi-hinam.co.il/Prices?p=N`,
+  paginated absolute blob links; `t=Stores` for the Stores file). Cerberus gotchas handled:
+  the login **rotates the CSRF token** (re-read from `/file` after login), store files are
+  **UTF-16**, branch id is the third dash-segment of `PriceFull` filenames. Dead/unusable:
+  Victory group (`laibcatalog.co.il`, ASP.NET UpdatePanel, never returned rows),
+  binaprojects (King Store etc.) and `matrixcatalog` domains no longer resolve.
+- **City matching** (`cityMatcher`): many chains put the **CBS settlement code** in
+  `<City>` (חיפה = 4000) instead of a name, so a branch matches by code
+  (`scripts/cityCodes.json`, generated once from data.gov.il) OR by name substring over
+  city+address+store name, with "קריית"→"קרית" folded.
+- **Weighed goods have no national barcode.** Produce/deli carry a different internal
+  code per chain, so they are matched **by name** inside each branch file among
+  `bIsWeighted=1` items (`parseWeighted`/`matchWeighed`: same normalized name → same
+  stem ("עגבניות"/"עגבניה") → name + harmless qualifier ("ארוז", "תפזורת"); qualifiers
+  that change the product ("אורגני", "ציפס", "שרי"…) are blocked). Price is **per kg**
+  (`unit:'kg'`). An unpinned name is weighed when chp's top hit says "מחיר לפי משקל",
+  when chp knows nothing, or when some file has an EXACT (not stem) weighed name match
+  ("מלפפון" beats chp's pickles; stems are too loose — "חלב" stems like "חלבה").
+- **Product catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~45k rows
+  `[name, chainMask, barcode?]`, ~3 MB): the app's add bar offers concrete products from it
+  (`lib/catalog.ts` `searchCatalog`, lazy-loaded by `useCatalog` on first focus, cached by
+  the SW `price-data` rule). Picking one **pins** the nameKey (`pins[k] = {kind:'barcode',
+  code, name} | {kind:'weighed', name}`; legacy bare-string pins = barcode) via
+  `usePrices.pinProduct`, and the job prices exactly that.
 - `.github/workflows/prices.yml` runs nightly: reads `config/trackedProducts` (the public
   Firestore doc) via unauthenticated REST, resolves barcodes ONCE (a barcode is national),
-  fetches portal prices **per tracked city**, and force-pushes a compact `prices.json` to the
-  orphan `data` branch using the built-in `github.token` — **no service-account key, no
-  secret**. Shape: `{updatedAt, cities:[...], byCity:{<city>:{city, stores:[{key,chain,name,
-  address}], items:[{k(nameKey), n, barcode, product, byStore:{storeKey:price}, candidates}]}},
-  ...}` plus a top-level single-city mirror (`city/stores/items` = first city) for older app
-  builds. Keyed by **nameKey** so the app crosses its list items directly. `nameKeyOf` is
-  duplicated in the script — keep it in sync with `lib/categories.ts`.
+  fetches portal prices **per tracked city**, and force-pushes `prices.json`, `catalog.json`
+  and `branches.json` to the orphan `data` branch using the built-in `github.token` — **no
+  service-account key, no secret**. Shape: `{updatedAt, cities:[...], byCity:{<city>:{city,
+  stores:[{key,chain,name,address}], items:[{k(nameKey), n, kind, barcode, product, unit?,
+  pinned, byStore:{storeKey:price}, candidates}]}}, ...}` plus a top-level single-city mirror
+  (`city/stores/items` = first city) for older app builds. Keyed by **nameKey** so the app
+  crosses its list items directly. `nameKeyOf` is duplicated in the script — keep it in sync
+  with `lib/categories.ts`.
 - `config/trackedProducts` is the one publicly-readable Firestore doc (rules: `read: if
-  true`, `write: if allowed()`): `{products:[{k,n}], pins:{nameKey:barcode}, cities:[...]}`.
-  `usePrices` merge-writes `products` (the current list, debounced), `pins` (user overrides)
+  true`, `write: if allowed()`): `{products:[{k,n}], pins:{nameKey:ProductLink}, cities:[...]}`.
+  `usePrices` merge-writes `products` (the current list, debounced), `pins` (user picks)
   and `cities` (arrayUnion/Remove) as **separate fields** so changing one never clobbers the
   others. Seeded with `cities:["חיפה"]`; a new city takes effect on the next run.
 - **App side** (`lib/prices.ts`: `fetchPriceData`, `availableCities`, `cityData` → a
@@ -137,8 +162,9 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
   and `addCity`. `PriceCheckSheet` (💰 header button): city switcher, ranking, and per-store
   **"אני בסופר"** → an in-aisle list with each product's price + scannable **EAN-13 barcode**
   (`Barcode.tsx`). City picker list is `lib/cities.ts`.
-- Not built yet: pinning a specific product from the UI (`pinProduct`/`candidates` exist,
-  no picker), camera barcode scan, per-store totals inline on the main list.
+- Not built yet: re-pinning an item that is already on the list (pins happen only when
+  picking a catalog row in the add bar; `candidates` exist but no picker in the sheet),
+  camera barcode scan, per-store totals inline on the main list, Victory group prices.
 
 ## Firebase config gotchas
 

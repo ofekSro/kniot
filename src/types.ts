@@ -1,4 +1,5 @@
 import type { Timestamp } from 'firebase/firestore'
+import type { ProductLink } from './lib/prices'
 
 export interface Item {
   id: string
@@ -39,4 +40,8 @@ export interface Suggestion {
   store: string | null
   qty: string | null
   isFavorite: boolean
+  /** Set for catalog rows: the concrete product the name gets pinned to. */
+  product?: ProductLink
+  /** Chains stocking a catalog row (shown as a hint). */
+  chains?: string[]
 }

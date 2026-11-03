@@ -15,14 +15,29 @@ export interface PriceCandidate {
   barcode: string
 }
 
+/**
+ * What a list name is pinned to in config/trackedProducts.pins. Packaged goods
+ * pin a national barcode; weighed goods (produce, deli) have a different code
+ * per chain, so they pin a name that the job matches inside each branch file.
+ */
+export type ProductLink =
+  | { kind: 'barcode'; code: string; name: string }
+  | { kind: 'weighed'; name: string }
+
 export interface PricedItem {
   /** nameKey — matches the app's list items. */
   k: string
   /** The tracked list name at the time of the fetch. */
   n: string
+  /** Empty for weighed goods (their codes differ per chain). */
   barcode: string
   /** Canonical product that was actually priced. */
   product: string
+  kind?: 'barcode' | 'weighed'
+  /** 'kg' when prices are per kilogram (weighed goods). */
+  unit?: 'kg'
+  /** True when the user pinned this product (vs. the job's auto-pick). */
+  pinned?: boolean
   /** branch key → unit price. */
   byStore: Record<string, number>
   candidates?: PriceCandidate[]
@@ -107,6 +122,9 @@ export interface ItemBreakdown {
   product?: string
   /** Quantity multiplier applied (parsed from the list item's qty). */
   qty: number
+  /** 'kg' when the price is per kilogram. */
+  unit?: 'kg'
+  pinned?: boolean
   /** True when at least one store has a price for it. */
   priced: boolean
   cheapest?: { store: PriceStore; price: number }
@@ -191,6 +209,8 @@ export function rankBasket(
       name: b.a.name,
       product: b.priced.product,
       qty: b.mult,
+      unit: b.priced.unit,
+      pinned: b.priced.pinned,
       priced: !!cheapest,
       cheapest,
       byStore: b.priced.byStore,

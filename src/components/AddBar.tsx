@@ -1,26 +1,40 @@
 import { useMemo, useRef, useState } from 'react'
 import { getCategory, guessCategory, nameKeyOf } from '../lib/categories'
+import { linkOf, searchCatalog, type CatalogEntry } from '../lib/catalog'
+import type { ProductLink } from '../lib/prices'
 import type { Favorite, HistoryEntry, Suggestion } from '../types'
 
 interface Props {
   history: readonly HistoryEntry[]
   favorites: readonly Favorite[]
+  /** Nightly product catalog (empty until loaded — see onFocus). */
+  catalog: readonly CatalogEntry[]
+  /** Called on focus so the catalog is only fetched once the bar is used. */
+  onFocus: () => void
   onAdd: (draft: {
     name: string
     category: string
     /** From history when known; the caller derives from category when null. */
     store: string | null
     qty: string | null
+    /** A concrete product chosen from the catalog, to pin for pricing. */
+    product?: ProductLink
   }) => Promise<void>
   onOpenFavorites: () => void
 }
 
 const MAX_SUGGESTIONS = 6
+const MAX_CATALOG = 5
 
-export function AddBar({ history, favorites, onAdd, onOpenFavorites }: Props) {
+export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavorites }: Props) {
   const [query, setQuery] = useState('')
   const [focused, setFocused] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const historyByKey = useMemo(
+    () => new Map(history.map((h) => [h.id, h])),
+    [history],
+  )
 
   /**
    * Favorites first, then history by how often it was bought. Prefix match on
@@ -67,10 +81,34 @@ export function AddBar({ history, favorites, onAdd, onOpenFavorites }: Props) {
     return out.slice(0, MAX_SUGGESTIONS)
   }, [query, history, favorites])
 
-  const historyByKey = useMemo(
-    () => new Map(history.map((h) => [h.id, h])),
-    [history],
-  )
+  /**
+   * Concrete products from the chains' catalog, so the typed name gets pinned
+   * to exactly what should be priced ("מלפפון" the vegetable, not the pickles).
+   * Names already offered from favorites/history are skipped.
+   */
+  const catalogRows = useMemo<Suggestion[]>(() => {
+    if (!query.trim()) return []
+    const taken = new Set(suggestions.map((s) => s.nameKey))
+    const out: Suggestion[] = []
+    for (const e of searchCatalog(catalog, query, MAX_CATALOG + MAX_SUGGESTIONS)) {
+      const key = nameKeyOf(e.name)
+      if (taken.has(key)) continue
+      taken.add(key)
+      const known = historyByKey.get(key)
+      out.push({
+        nameKey: key,
+        name: e.name,
+        category: known?.category ?? guessCategory(e.name),
+        store: known?.store ?? null,
+        qty: known?.lastQty ?? null,
+        isFavorite: false,
+        product: linkOf(e),
+        chains: e.chains,
+      })
+      if (out.length >= MAX_CATALOG) break
+    }
+    return out
+  }, [query, catalog, suggestions, historyByKey])
 
   /** A typed name reuses its history entry; otherwise the keyword guesser runs. */
   async function submitTyped() {
@@ -89,10 +127,16 @@ export function AddBar({ history, favorites, onAdd, onOpenFavorites }: Props) {
   async function submitSuggestion(s: Suggestion) {
     setQuery('')
     inputRef.current?.focus()
-    await onAdd({ name: s.name, category: s.category, store: s.store, qty: s.qty })
+    await onAdd({
+      name: s.name,
+      category: s.category,
+      store: s.store,
+      qty: s.qty,
+      product: s.product,
+    })
   }
 
-  const showSuggestions = focused && suggestions.length > 0
+  const showSuggestions = focused && (suggestions.length > 0 || catalogRows.length > 0)
 
   return (
     <div className="safe-top sticky top-0 z-30 border-b border-edge bg-app-bg/95 backdrop-blur">
@@ -108,7 +152,10 @@ export function AddBar({ history, favorites, onAdd, onOpenFavorites }: Props) {
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onFocus={() => setFocused(true)}
+            onFocus={() => {
+              setFocused(true)
+              onFocus()
+            }}
             // Delayed so a tap on a suggestion registers before the list unmounts.
             onBlur={() => window.setTimeout(() => setFocused(false), 120)}
             placeholder="הוסף מוצר…"
@@ -120,7 +167,7 @@ export function AddBar({ history, favorites, onAdd, onOpenFavorites }: Props) {
           />
 
           {showSuggestions && (
-            <ul className="absolute inset-x-0 top-full z-40 mt-1.5 overflow-hidden rounded-2xl border border-edge bg-card shadow-xl">
+            <ul className="absolute inset-x-0 top-full z-40 mt-1.5 max-h-[60dvh] overflow-y-auto rounded-2xl border border-edge bg-card shadow-xl">
               {suggestions.map((s) => {
                 const cat = getCategory(s.category)
                 return (
@@ -144,6 +191,37 @@ export function AddBar({ history, favorites, onAdd, onOpenFavorites }: Props) {
                   </li>
                 )
               })}
+
+              {catalogRows.length > 0 && (
+                <li
+                  className={
+                    'px-4 pt-2 pb-1 text-xs text-ink-faint ' +
+                    (suggestions.length > 0 ? 'border-t border-edge' : '')
+                  }
+                >
+                  מוצרים מהרשתות — בחירה מצמידה מחיר מדויק
+                </li>
+              )}
+              {catalogRows.map((s) => (
+                <li key={'cat:' + s.nameKey}>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => void submitSuggestion(s)}
+                    className="flex min-h-12 w-full items-center gap-2.5 px-4 text-start transition active:bg-track"
+                  >
+                    <span aria-hidden>{s.product?.kind === 'weighed' ? '⚖️' : '🏷️'}</span>
+                    <span className="min-w-0 flex-1 truncate font-medium">{s.name}</span>
+                    <span className="shrink-0 text-xs text-ink-faint">
+                      {s.product?.kind === 'weighed'
+                        ? 'לפי משקל'
+                        : s.chains && s.chains.length === 1
+                          ? s.chains[0]
+                          : `${s.chains?.length ?? 0} רשתות`}
+                    </span>
+                  </button>
+                </li>
+              ))}
             </ul>
           )}
         </form>

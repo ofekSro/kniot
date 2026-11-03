@@ -1,13 +1,15 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import type { User } from 'firebase/auth'
-import { CATEGORIES } from '../lib/categories'
+import { CATEGORIES, nameKeyOf } from '../lib/categories'
 import { STORES, isStoreId, storeForCategory } from '../lib/stores'
+import type { ProductLink } from '../lib/prices'
 import { useItems } from '../hooks/useItems'
 import { useHistory } from '../hooks/useHistory'
 import { useFavorites } from '../hooks/useFavorites'
 import { useOnline } from '../hooks/useOnline'
 import { useAppTitle } from '../hooks/useAppTitle'
 import { usePrices } from '../hooks/usePrices'
+import { useCatalog } from '../hooks/useCatalog'
 import { AddBar } from './AddBar'
 import { EditableTitle } from './EditableTitle'
 import { CategoryGroup } from './CategoryGroup'
@@ -57,7 +59,9 @@ export function ListScreen({ user, onSignOut }: Props) {
     cities: priceCities,
     setCity: setPriceCity,
     addCity: addPriceCity,
+    pinProduct,
   } = usePrices(active)
+  const { entries: catalog, ensure: ensureCatalog } = useCatalog()
 
   const [splitByStore, setSplitByStore] = useState(() => {
     try {
@@ -98,16 +102,25 @@ export function ListScreen({ user, onSignOut }: Props) {
       category: string
       store: string | null
       qty: string | null
+      product?: ProductLink
     }) => {
+      const { product, ...fields } = draft
       const result = await addItem({
-        ...draft,
+        ...fields,
         // A store remembered in history wins over the category default.
         store: isStoreId(draft.store) ? draft.store : storeForCategory(draft.category),
         note: null,
       })
       if (result.kind === 'duplicate') flash(result.id)
+      // A product picked from the catalog is pinned for the nightly pricing
+      // (also when the row already existed — the pin is what was asked for).
+      if (product) {
+        void pinProduct(nameKeyOf(draft.name), product).catch(() => {
+          // Offline writes queue in the Firestore cache; a denial is non-fatal.
+        })
+      }
     },
-    [addItem, flash],
+    [addItem, flash, pinProduct],
   )
 
   const historyByKey = useMemo(
@@ -234,6 +247,8 @@ export function ListScreen({ user, onSignOut }: Props) {
       <AddBar
         history={history}
         favorites={favorites}
+        catalog={catalog}
+        onFocus={ensureCatalog}
         onAdd={handleAdd}
         onOpenFavorites={() => setFavoritesOpen(true)}
       />

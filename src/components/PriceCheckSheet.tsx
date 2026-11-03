@@ -39,6 +39,8 @@ function freshness(iso?: string): string {
 }
 
 const shekel = (n: number) => '₪' + n.toFixed(2)
+/** Weighed goods are priced per kilogram. */
+const perUnit = (unit?: 'kg') => (unit === 'kg' ? ' לק״ג' : '')
 
 /** Active items in store-walking (category) order — for the in-store view. */
 function inWalkOrder(active: readonly Item[]): Item[] {
@@ -299,7 +301,15 @@ export function PriceCheckSheet({
                             {it.qty > 1 && <span className="ms-1 text-ink-faint">×{it.qty}</span>}
                           </p>
                           {it.priced ? (
-                            <p className="truncate text-xs text-ink-faint">{it.product}</p>
+                            <p className="truncate text-xs text-ink-faint">
+                              {it.pinned && (
+                                <span className="me-1" title="מוצר מוצמד" aria-hidden>
+                                  📌
+                                </span>
+                              )}
+                              {it.product}
+                              {it.unit === 'kg' && ' · לפי משקל'}
+                            </p>
                           ) : (
                             <p className="text-xs text-ink-faint">ממתין לעדכון</p>
                           )}
@@ -308,6 +318,7 @@ export function PriceCheckSheet({
                           <div className="shrink-0 text-end">
                             <p className="text-sm font-bold">
                               {shekel(it.cheapest.price * it.qty)}
+                              {perUnit(it.unit)}
                             </p>
                             <p className="text-xs text-ink-faint">{it.cheapest.store.chain}</p>
                           </div>
@@ -380,21 +391,30 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
                     {item.qty && <span className="ms-1 text-xs text-ink-faint">{item.qty}</span>}
                   </p>
                   {priced ? (
-                    <p className="truncate text-xs text-ink-muted">{priced.product}</p>
+                    <p className="truncate text-xs text-ink-muted">
+                      {priced.unit === 'kg' && (
+                        <span className="me-1" aria-hidden>
+                          ⚖️
+                        </span>
+                      )}
+                      {priced.product}
+                      {priced.unit === 'kg' && ' · לפי משקל'}
+                    </p>
                   ) : (
                     <p className="text-xs text-ink-faint">לא תומחר עדיין</p>
                   )}
                 </div>
                 <span className="shrink-0 text-sm font-bold">
                   {price != null ? (
-                    shekel(price)
+                    shekel(price) + perUnit(priced?.unit)
                   ) : priced ? (
                     <span className="text-ink-faint">לא בסניף</span>
                   ) : null}
                 </span>
               </div>
 
-              {priced && (
+              {/* Weighed goods have no national barcode — you weigh them in the aisle. */}
+              {priced && priced.barcode && (
                 <div className="mt-2 flex flex-col items-center gap-1">
                   <Barcode code={priced.barcode} />
                   <span className="font-mono text-xs tracking-wider text-ink-muted">

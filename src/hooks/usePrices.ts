@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Timestamp, arrayRemove, arrayUnion, doc, setDoc } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { nameKeyOf } from '../lib/categories'
-import { availableCities, fetchPriceData, type PriceData } from '../lib/prices'
+import {
+  availableCities,
+  fetchPriceData,
+  type PriceData,
+  type ProductLink,
+} from '../lib/prices'
 
 const trackedRef = doc(db, 'config', 'trackedProducts')
 const CITY_KEY = 'priceCity'
@@ -98,8 +103,9 @@ export function usePrices(active: readonly { name: string }[]) {
     return () => window.clearTimeout(id)
   }, [products])
 
-  const pinProduct = useCallback(async (key: string, barcode: string) => {
-    await setDoc(trackedRef, { pins: { [key]: barcode } }, { merge: true })
+  /** Pin what a list name means (a barcode, or a weighed produce name). */
+  const pinProduct = useCallback(async (key: string, link: ProductLink) => {
+    await setDoc(trackedRef, { pins: { [key]: link } }, { merge: true })
   }, [])
 
   // Add/remove a city the nightly job should fetch (takes effect next run —

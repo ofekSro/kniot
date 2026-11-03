@@ -59,8 +59,19 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
         navigateFallback: 'index.html',
         // Firestore traffic is non-GET / streaming, so Workbox ignores it by design.
-        // Only the Google Fonts CDN needs a rule, so Heebo still renders offline.
+        // Rules: the Google Fonts CDN (so Heebo renders offline) and the nightly
+        // price/catalog JSONs on the data branch (served stale while refreshing;
+        // the `?t=` cache-busting refresh deliberately bypasses this rule).
         runtimeCaching: [
+          {
+            urlPattern: /^https:\/\/raw\.githubusercontent\.com\/ofekSro\/kniot\/data\/[a-z]+\.json$/i,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'price-data',
+              expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 14 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
           {
             urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
             handler: 'CacheFirst',
