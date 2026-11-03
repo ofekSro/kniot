@@ -33,7 +33,7 @@ jobs:
             --out public_data
           echo "--- output size ---"
           ls -la public_data/
-          wc -c public_data/prices.json
+          wc -c public_data/prices.json public_data/catalog.json
 
       - name: Publish to the data branch (served via raw.githubusercontent)
         run: |
@@ -42,6 +42,6 @@ jobs:
           git checkout -q -b data
           git config user.name "kniot price bot"
           git config user.email "actions@github.com"
-          git add prices.json branches.json
+          git add prices.json branches.json catalog.json
           git commit -q -m "prices $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -f -q "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
