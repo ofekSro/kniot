@@ -643,7 +643,8 @@ async function resolveProducts(products, pins) {
       const candidates = (await chpAutocomplete(p.n)).slice(0, 6)
       const top = candidates[0]
       if (!top) {
-        resolved.push({ k, n: p.n, kind: 'weighed', name: p.n, product: p.n, candidates })
+        // Nothing known about the name: only a (near-)exact weighed name can price it.
+        resolved.push({ k, n: p.n, kind: 'weighed', name: p.n, product: p.n, strict: true, candidates })
         return
       }
       if (/לפי משקל/.test(top.name)) {
@@ -696,7 +697,7 @@ async function main() {
   const wantedBarcodes = new Set(resolved.filter((r) => r.barcode).map((r) => r.barcode))
   const weighedQueries = resolved
     .filter((r) => r.kind !== 'barcode')
-    .map((r) => ({ k: r.k, ...weighedQuery(r.name) }))
+    .map((r) => ({ k: r.k, strict: !!r.strict, ...weighedQuery(r.name) }))
     .filter((q) => q.stem)
   console.log(
     `resolved ${resolved.length}/${products.length} products ` +
@@ -706,7 +707,18 @@ async function main() {
   mkdirSync(outDir, { recursive: true })
   const failures = [...resolveFailures]
   const catalog = new Catalog()
-  const exactWeighed = new Set() // product keys with an exact weighed name match somewhere
+  // For 'auto' products: how many branch files priced the chp barcode vs. had
+  // an EXACT weighed name match. Decided after all files, by coverage, so one
+  // chain's deli "שמנת חמוצה" cannot hijack a packaged product that every store
+  // sells by barcode, while "מלפפון" (weighed everywhere) beats chp's pickles.
+  const barcodeHits = {}
+  const exactHits = {}
+  const autoByBarcode = new Map()
+  for (const r of resolved) {
+    if (r.kind !== 'auto') continue
+    if (!autoByBarcode.has(r.barcode)) autoByBarcode.set(r.barcode, [])
+    autoByBarcode.get(r.barcode).push(r.k)
+  }
 
   // Per-city accumulators.
   const acc = {}
@@ -766,15 +778,16 @@ async function main() {
         slice.priceByBarcode[it.code] ??= {}
         const prev = slice.priceByBarcode[it.code][key]
         if (prev == null || it.price < prev) slice.priceByBarcode[it.code][key] = it.price
+        for (const k of autoByBarcode.get(it.code) ?? []) barcodeHits[k] = (barcodeHits[k] ?? 0) + 1
       }
       if (weighedQueries.length) {
         const weighted = parseWeighted(xml)
         for (const q of weighedQueries) {
           const m = matchWeighed(weighted, q)
-          if (!m) continue
+          if (!m || (q.strict && m.score > 0.5)) continue
           slice.weighedByKey[q.k] ??= {}
           slice.weighedByKey[q.k][key] = { price: m.price, name: m.name }
-          if (m.score === 0) exactWeighed.add(q.k)
+          if (m.score === 0) exactHits[q.k] = (exactHits[q.k] ?? 0) + 1
         }
       }
       if (catalog.wants(t.branch.chain)) catalog.add(xml, t.branch.chain, t.branch.chainName)
@@ -784,11 +797,15 @@ async function main() {
     if (++done % 50 === 0) console.log(`  …${done}/${tasks.length}`)
   })
 
+  const isWeighed = (r) =>
+    r.kind === 'weighed' ||
+    (r.kind === 'auto' && (exactHits[r.k] ?? 0) > 0 && (exactHits[r.k] ?? 0) >= 0.5 * (barcodeHits[r.k] ?? 0))
+
   const byCity = {}
   for (const city of cities) {
     const slice = acc[city]
     const items = resolved.map((r) => {
-      const weighed = r.kind === 'weighed' || (r.kind === 'auto' && exactWeighed.has(r.k))
+      const weighed = isWeighed(r)
       if (weighed) {
         const hits = slice.weighedByKey[r.k] ?? {}
         const byStore = {}

@@ -132,8 +132,11 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
   stem ("עגבניות"/"עגבניה") → name + harmless qualifier ("ארוז", "תפזורת"); qualifiers
   that change the product ("אורגני", "ציפס", "שרי"…) are blocked). Price is **per kg**
   (`unit:'kg'`). An unpinned name is weighed when chp's top hit says "מחיר לפי משקל",
-  when chp knows nothing, or when some file has an EXACT (not stem) weighed name match
-  ("מלפפון" beats chp's pickles; stems are too loose — "חלב" stems like "חלבה").
+  when chp knows nothing (then only a near-exact weighed name counts), or — for a name chp
+  resolved to a packaged barcode — when EXACT (not stem) weighed name matches cover at
+  least half as many branch files as the barcode does ("מלפפון" beats chp's pickles; one
+  chain's deli "שמנת חמוצה" does not hijack the packaged one; stems are too loose — "חלב"
+  stems like "חלבה").
 - **Product catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~45k rows
   `[name, chainMask, barcode?]`, ~3 MB): the app's add bar offers concrete products from it
   (`lib/catalog.ts` `searchCatalog`, lazy-loaded by `useCatalog` on first focus, cached by
