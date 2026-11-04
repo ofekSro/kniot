@@ -142,13 +142,17 @@ async function fetchBytes(url, init = {}) {
 
 const FINALS = { ך: 'כ', ם: 'מ', ן: 'נ', ף: 'פ', ץ: 'צ' }
 
-/** Lowercase, drop quotes/niqqud, fold final letters, punctuation → spaces. */
+/**
+ * Lowercase, drop quotes/niqqud, fold final letters and the double-yod spelling
+ * ("עגבנייה" → "עגבניה"), punctuation → spaces.
+ */
 export function normalizeName(s) {
   return String(s)
     .toLowerCase()
     .replace(/[֑-ׇ]/g, '')
     .replace(/["'`״׳]/g, '')
     .replace(/[ךםןףץ]/g, (c) => FINALS[c])
+    .replace(/יי/g, 'י')
     .replace(/[\s,.\-/()+*:]+/g, ' ')
     .trim()
 }
@@ -156,9 +160,10 @@ export function normalizeName(s) {
 /**
  * Crude singular/plural folding: "עגבניה"/"עגבניות" → "עגבני", "מלפפון"/"מלפפונים"
  * → "מלפפונ". Only strips when at least 3 letters remain ("תות" stays "תות").
+ * Runs on normalized text, so the plural suffix is "ימ" (final מ already folded).
  */
 export function stemWord(w) {
-  for (const suf of ['ות', 'ים', 'ה', 'ת']) {
+  for (const suf of ['ות', 'ימ', 'ה', 'ת']) {
     if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length)
   }
   return w
@@ -176,14 +181,31 @@ const BLOCK_STEMS = [
   'קלוף', 'מגורד', 'פרוס', 'מעושן', 'מתובל', 'תבלין', 'ליטר', 'מל', 'גרם', 'יח', 'יחיד',
   'שלוק', 'קוביות', 'רצועות', 'מבחר', 'מיקס', 'ירקות', 'פירות',
 ].map((w) => stemWord(normalizeName(w)))
-/** Qualifiers that do not change the product ("גזר ארוז" is still carrots). */
+/**
+ * Qualifiers that do not change the product ("גזר ארוז" is still carrots,
+ * "עגבניה יומי" is still tomatoes): packaging, freshness, origin, grade.
+ */
 const NEUTRAL_STEMS = new Set(
-  ['במשקל', 'תפזורת', 'בתפזורת', 'ארוז', 'ארוזה', 'ארוזות', 'טרי', 'טריה', 'טריים', 'מובחר', 'ישראלי', 'מקומי']
-    .map((w) => stemWord(normalizeName(w))),
+  [
+    'במשקל', 'תפזורת', 'בתפזורת', 'שקיל', 'ארוז', 'ארוזה', 'ארוזות', 'בקרטון', 'בשקית',
+    'טרי', 'טריה', 'טריים', 'יומי', 'מובחר', 'פרימיום', 'איכותי', 'ישראלי', 'ישראל',
+    'מקומי', 'חממה', 'מהחממה',
+  ].map((w) => stemName(w)),
 )
 
 function isBlocked(stem) {
   return BLOCK_STEMS.some((b) => stem.startsWith(b))
+}
+
+/**
+ * The identity of a weighed product across spellings: its stemmed words minus
+ * neutral qualifiers, so "עגבניה", "עגבנייה", "עגבניות ישראל" and "עגבניה יומי"
+ * all become "עגבני". Falls back to the full stem when nothing else remains.
+ */
+export function canonicalWeighed(name) {
+  const words = stemName(name).split(' ').filter(Boolean)
+  const kept = words.filter((w) => !NEUTRAL_STEMS.has(w))
+  return (kept.length ? kept : words).join(' ')
 }
 
 /**
@@ -204,43 +226,38 @@ function parseWeighted(xml) {
     const name = tag(block, 'ItemName')
     const price = Number.parseFloat(tag(block, 'ItemPrice'))
     if (!name || !Number.isFinite(price) || price <= 0) continue
-    out.push({
-      code: tag(block, 'ItemCode'),
-      name,
-      price,
-      norm: normalizeName(name),
-      stem: stemName(name),
-    })
+    out.push({ code: tag(block, 'ItemCode'), name, price, ...weighedQuery(name) })
   }
   return out
 }
 
 /** A product name prepared for matchWeighed. */
 export function weighedQuery(name) {
-  return { norm: normalizeName(name), stem: stemName(name) }
+  return { norm: normalizeName(name), canon: canonicalWeighed(name) }
 }
 
 /**
- * Best weighed item for a product name: the same name (score 0), the same stem
- * ("עגבניות"/"עגבניה", 0.5), else the name followed only by neutral/plain
- * qualifiers (1 + extra words), never a blocked qualifier. Ties go to the
- * cheaper item. Only score 0 is "exact": stems are too loose to prove that an
- * unpinned name meant produce ("חלב" stems like "חלבה").
+ * Best weighed item for a product name: the same name (score 0), the same
+ * product under another spelling ("עגבניות"/"עגבנייה"/"עגבניה יומי", 0.5), else
+ * the product followed by further plain qualifiers (1 + extra words), never a
+ * blocked one. Ties go to the cheaper item. Only score 0 is "exact": stems are
+ * too loose to prove that an unpinned name meant produce ("חלב" stems like
+ * "חלבה").
  */
 export function matchWeighed(weighted, query) {
-  const { norm, stem } = query
-  if (!stem) return null
+  const { norm, canon } = query
+  if (!canon) return null
   let best = null
   for (const w of weighted) {
     let score
     if (w.norm === norm) {
       score = 0
-    } else if (w.stem === stem) {
+    } else if (w.canon === canon) {
       score = 0.5
-    } else if (w.stem.startsWith(stem + ' ')) {
-      const extra = w.stem.slice(stem.length + 1).split(' ')
+    } else if (w.canon.startsWith(canon + ' ')) {
+      const extra = w.canon.slice(canon.length + 1).split(' ')
       if (extra.some(isBlocked)) continue
-      score = 1 + extra.filter((x) => !NEUTRAL_STEMS.has(x)).length
+      score = 1 + extra.length
     } else {
       continue
     }
@@ -275,14 +292,17 @@ function parseWanted(xml, wanted) {
 
 /**
  * Union of every product seen in the branch files, for the app's "type → pick a
- * concrete product" suggestions. Packaged goods are keyed by barcode (national),
- * weighed goods by name stem (their codes differ per chain).
+ * concrete product" suggestions. One row per PRODUCT, not per listing: weighed
+ * goods merge across spellings (canonicalWeighed — their codes differ per chain
+ * anyway) and packaged goods merge when the same name carries different
+ * barcodes at different chains (store brands), keeping every code so the job
+ * can price whichever one a branch stocks.
  */
 class Catalog {
   constructor() {
     this.chains = [] // index → display name
     this.packaged = new Map() // code → { n, ch:Set<index> }
-    this.weighed = new Map() // stem → { names: Map<name,count>, ch:Set<index> }
+    this.weighed = new Map() // canonical → { names: Map<name,count>, ch:Set<index> }
     this.filesPerChain = {}
   }
 
@@ -306,10 +326,10 @@ class Catalog {
       const name = unescapeHtml(m[2]).replace(/\s+/g, ' ').trim()
       if (!name || name.length < 2) continue
       if (m[3] === '1') {
-        const stem = stemName(name)
-        if (!stem) continue
-        let e = this.weighed.get(stem)
-        if (!e) this.weighed.set(stem, (e = { names: new Map(), ch: new Set() }))
+        const key = canonicalWeighed(name)
+        if (!key) continue
+        let e = this.weighed.get(key)
+        if (!e) this.weighed.set(key, (e = { names: new Map(), ch: new Set() }))
         e.names.set(name, (e.names.get(name) ?? 0) + 1)
         e.ch.add(ci)
       } else {
@@ -324,18 +344,34 @@ class Catalog {
   }
 
   /**
-   * Compact shape (tens of thousands of rows): `[name, chainMask, barcode?]`,
-   * where chainMask has bit i set for `chains[i]` and no barcode means weighed.
+   * Compact shape (tens of thousands of rows): `[name, chainMask, barcodes?]`,
+   * where chainMask has bit i set for `chains[i]`, barcodes is a string (one
+   * code) or an array (same product under several codes), and no barcode means
+   * weighed.
    */
   toJSON() {
     const mask = (set) => [...set].reduce((m, i) => m | (1 << i), 0)
+    // Display the plainest spelling: fewest words, then most common, then shortest.
+    const display = (names) =>
+      [...names.entries()].sort(
+        (a, b) =>
+          a[0].split(' ').length - b[0].split(' ').length || b[1] - a[1] || a[0].length - b[0].length,
+      )[0][0]
     const products = []
-    for (const e of this.weighed.values()) {
-      // Display the most common spelling; prefer the shortest on a tie.
-      const n = [...e.names.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0]
-      products.push([n, mask(e.ch)])
+    for (const e of this.weighed.values()) products.push([display(e.names), mask(e.ch)])
+    // Packaged: first the fullest name per barcode, then one row per name.
+    const byName = new Map() // normalized name → { names, codes, ch }
+    for (const [code, e] of this.packaged) {
+      const key = normalizeName(e.n)
+      let g = byName.get(key)
+      if (!g) byName.set(key, (g = { names: new Map(), codes: [], ch: new Set() }))
+      g.names.set(e.n, (g.names.get(e.n) ?? 0) + 1)
+      g.codes.push(code)
+      for (const i of e.ch) g.ch.add(i)
     }
-    for (const [c, e] of this.packaged) products.push([e.n, mask(e.ch), c])
+    for (const g of byName.values()) {
+      products.push([display(g.names), mask(g.ch), g.codes.length === 1 ? g.codes[0] : g.codes])
+    }
     return { updatedAt: new Date().toISOString(), chains: this.chains, products }
   }
 }
@@ -596,13 +632,16 @@ async function readTracked(url) {
     .filter((p) => p.n)
   const pins = {}
   for (const [k, v] of Object.entries(f.pins?.mapValue?.fields ?? {})) {
-    // Legacy pins were a bare barcode string; new ones are {kind, code?, name?}.
+    // Legacy pins were a bare barcode string; new ones are {kind, code?, codes?, name?}.
     if (v?.stringValue) pins[k] = { kind: 'barcode', code: v.stringValue }
     const mf = v?.mapValue?.fields
     if (mf) {
+      const code = mf.code?.stringValue ?? ''
+      const codes = (mf.codes?.arrayValue?.values ?? []).map((c) => c.stringValue).filter(Boolean)
       pins[k] = {
         kind: mf.kind?.stringValue === 'weighed' ? 'weighed' : 'barcode',
-        code: mf.code?.stringValue ?? '',
+        code,
+        codes: [...new Set([code, ...codes])].filter(Boolean),
         name: mf.name?.stringValue ?? '',
       }
     }
@@ -636,8 +675,18 @@ async function resolveProducts(products, pins) {
       }
       if (pin?.code) {
         const candidates = (await chpAutocomplete(pin.code)).slice(0, 6)
-        const product = candidates.find((c) => c.barcode === pin.code)?.name ?? pin.name ?? p.n
-        resolved.push({ k, n: p.n, kind: 'barcode', barcode: pin.code, product, pinned: true, candidates })
+        const product = pin.name || candidates.find((c) => c.barcode === pin.code)?.name || p.n
+        resolved.push({
+          k,
+          n: p.n,
+          kind: 'barcode',
+          barcode: pin.code,
+          // The same product under several store-brand codes: price whichever a branch has.
+          codes: pin.codes?.length ? pin.codes : [pin.code],
+          product,
+          pinned: true,
+          candidates,
+        })
         return
       }
       const candidates = (await chpAutocomplete(p.n)).slice(0, 6)
@@ -694,11 +743,11 @@ async function main() {
   cities = [...new Set(cities)]
 
   const { resolved, failures: resolveFailures } = await resolveProducts(products, pins)
-  const wantedBarcodes = new Set(resolved.filter((r) => r.barcode).map((r) => r.barcode))
+  const wantedBarcodes = new Set(resolved.flatMap((r) => r.codes ?? (r.barcode ? [r.barcode] : [])))
   const weighedQueries = resolved
     .filter((r) => r.kind !== 'barcode')
     .map((r) => ({ k: r.k, strict: !!r.strict, ...weighedQuery(r.name) }))
-    .filter((q) => q.stem)
+    .filter((q) => q.canon)
   console.log(
     `resolved ${resolved.length}/${products.length} products ` +
       `(barcode ${resolved.filter((r) => r.kind === 'barcode').length}, weighed ${resolved.filter((r) => r.kind === 'weighed').length}, auto ${resolved.filter((r) => r.kind === 'auto').length}); cities: ${cities.length}`,
@@ -827,14 +876,28 @@ async function main() {
           candidates: r.candidates,
         }
       }
+      // Several codes (store brands of one product): per branch, the cheapest
+      // one it stocks, remembering which so the in-store view can show it.
+      const codes = r.codes ?? [r.barcode]
+      const byStore = {}
+      const codeByStore = {}
+      for (const code of codes) {
+        for (const [sk, price] of Object.entries(slice.priceByBarcode[code] ?? {})) {
+          if (byStore[sk] == null || price < byStore[sk]) {
+            byStore[sk] = price
+            codeByStore[sk] = code
+          }
+        }
+      }
       return {
         k: r.k,
         n: r.n,
         kind: 'barcode',
         barcode: r.barcode,
+        ...(codes.length > 1 ? { codes, codeByStore } : {}),
         product: r.product,
         pinned: r.pinned ?? false,
-        byStore: slice.priceByBarcode[r.barcode] ?? {},
+        byStore,
         candidates: r.candidates,
       }
     })

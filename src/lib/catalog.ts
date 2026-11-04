@@ -9,6 +9,8 @@ import type { ProductLink } from './prices'
 export interface CatalogEntry {
   /** National barcode — absent for weighed goods. */
   code?: string
+  /** All barcodes this one product goes by (store brands), when more than one. */
+  codes?: string[]
   name: string
   weighed: boolean
   /** Display names of the chains that stock it. */
@@ -22,11 +24,14 @@ export interface Catalog {
   entries: CatalogEntry[]
 }
 
-/** Compact nightly shape: rows are `[name, chainMask, barcode?]` (no barcode = weighed). */
+/**
+ * Compact nightly shape: rows are `[name, chainMask, barcodes?]` — a string for
+ * one code, an array when the same product has several, none = weighed.
+ */
 interface RawCatalog {
   updatedAt: string
   chains: string[]
-  products: [string, number, string?][]
+  products: [string, number, (string | string[])?][]
 }
 
 const CATALOG_URL = 'https://raw.githubusercontent.com/ofekSro/kniot/data/catalog.json'
@@ -46,10 +51,14 @@ export async function fetchCatalog(): Promise<Catalog | null> {
     const entries: CatalogEntry[] = []
     for (const row of raw.products) {
       if (!Array.isArray(row) || typeof row[0] !== 'string' || !row[0]) continue
-      const [name, mask, code] = row
-      const weighed = !code
+      const [name, mask, rawCodes] = row
+      const codes = (Array.isArray(rawCodes) ? rawCodes : [rawCodes]).filter(
+        (c): c is string => typeof c === 'string' && c.length > 0,
+      )
+      const weighed = codes.length === 0
       entries.push({
-        code: weighed ? undefined : code,
+        code: codes[0],
+        codes: codes.length > 1 ? codes : undefined,
         name,
         weighed,
         chains: chains.filter((_, i) => (Number(mask) >> i) & 1),
@@ -93,7 +102,8 @@ export function searchCatalog(
 }
 
 export function linkOf(entry: CatalogEntry): ProductLink {
-  return entry.weighed || !entry.code
-    ? { kind: 'weighed', name: entry.name }
+  if (entry.weighed || !entry.code) return { kind: 'weighed', name: entry.name }
+  return entry.codes
+    ? { kind: 'barcode', code: entry.code, codes: entry.codes, name: entry.name }
     : { kind: 'barcode', code: entry.code, name: entry.name }
 }

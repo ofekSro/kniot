@@ -129,27 +129,36 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
 - **Weighed goods have no national barcode.** Produce/deli carry a different internal
   code per chain, so they are matched **by name** inside each branch file among
   `bIsWeighted=1` items (`parseWeighted`/`matchWeighed`: same normalized name → same
-  stem ("עגבניות"/"עגבניה") → name + harmless qualifier ("ארוז", "תפזורת"); qualifiers
-  that change the product ("אורגני", "ציפס", "שרי"…) are blocked). Price is **per kg**
+  canonical product → product + further plain qualifier; qualifiers that change the
+  product ("אורגני", "ציפס", "שרי"…) are blocked). `normalizeName` folds finals and
+  "יי"→"י"; `canonicalWeighed` = stemmed words minus `NEUTRAL_STEMS` (ארוז, תפזורת,
+  יומי, ישראל, חממה…), so "עגבניה"/"עגבנייה"/"עגבניה יומי"/"עגבניות ישראל" are one
+  product — the catalog has one row per canonical product. Price is **per kg**
   (`unit:'kg'`). An unpinned name is weighed when chp's top hit says "מחיר לפי משקל",
   when chp knows nothing (then only a near-exact weighed name counts), or — for a name chp
   resolved to a packaged barcode — when EXACT (not stem) weighed name matches cover at
   least half as many branch files as the barcode does ("מלפפון" beats chp's pickles; one
   chain's deli "שמנת חמוצה" does not hijack the packaged one; stems are too loose — "חלב"
   stems like "חלבה").
-- **Product catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~45k rows
-  `[name, chainMask, barcode?]`, ~3 MB): the app's add bar offers concrete products from it
-  (`lib/catalog.ts` `searchCatalog`, lazy-loaded by `useCatalog` on first focus, cached by
-  the SW `price-data` rule). Picking one **pins** the nameKey (`pins[k] = {kind:'barcode',
-  code, name} | {kind:'weighed', name}`; legacy bare-string pins = barcode) via
-  `usePrices.pinProduct`, and the job prices exactly that.
+- **Product catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~60k rows
+  `[name, chainMask, barcodes?]` where barcodes is a string or, for one product sold under
+  several store-brand codes with the same name, an array; none = weighed): the app's add
+  bar offers concrete products from it (`lib/catalog.ts` `searchCatalog`, lazy-loaded by
+  `useCatalog` on first focus, cached by the SW `price-data` rule). **One row per
+  product, never per chain** — the user asked explicitly not to see "the same product
+  several times pinned to different chains". Picking one **pins** the nameKey
+  (`pins[k] = {kind:'barcode', code, codes?, name} | {kind:'weighed', name}`; legacy
+  bare-string pins = barcode) via `usePrices.pinProduct`; with `codes` the job prices
+  whichever code each branch stocks (cheapest) and records it in `codeByStore` so the
+  in-store view shows the right barcode.
 - `.github/workflows/prices.yml` runs nightly: reads `config/trackedProducts` (the public
   Firestore doc) via unauthenticated REST, resolves barcodes ONCE (a barcode is national),
   fetches portal prices **per tracked city**, and force-pushes `prices.json`, `catalog.json`
   and `branches.json` to the orphan `data` branch using the built-in `github.token` — **no
   service-account key, no secret**. Shape: `{updatedAt, cities:[...], byCity:{<city>:{city,
-  stores:[{key,chain,name,address}], items:[{k(nameKey), n, kind, barcode, product, unit?,
-  pinned, byStore:{storeKey:price}, candidates}]}}, ...}` plus a top-level single-city mirror
+  stores:[{key,chain,name,address}], items:[{k(nameKey), n, kind, barcode, codes?,
+  codeByStore?, product, unit?, pinned, byStore:{storeKey:price}, candidates}]}}, ...}` plus a
+  top-level single-city mirror
   (`city/stores/items` = first city) for older app builds. Keyed by **nameKey** so the app
   crosses its list items directly. `nameKeyOf` is duplicated in the script — keep it in sync
   with `lib/categories.ts`.

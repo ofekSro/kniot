@@ -21,7 +21,13 @@ export interface PriceCandidate {
  * per chain, so they pin a name that the job matches inside each branch file.
  */
 export type ProductLink =
-  | { kind: 'barcode'; code: string; name: string }
+  | {
+      kind: 'barcode'
+      code: string
+      /** The same product under several codes (store brands); `code` is one of them. */
+      codes?: string[]
+      name: string
+    }
   | { kind: 'weighed'; name: string }
 
 export interface PricedItem {
@@ -31,6 +37,9 @@ export interface PricedItem {
   n: string
   /** Empty for weighed goods (their codes differ per chain). */
   barcode: string
+  /** When one product was priced under several codes: all of them, and which one each branch stocks. */
+  codes?: string[]
+  codeByStore?: Record<string, string>
   /** Canonical product that was actually priced. */
   product: string
   kind?: 'barcode' | 'weighed'

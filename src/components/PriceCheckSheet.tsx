@@ -354,7 +354,9 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
       total += price
       covered++
     }
-    return { item, priced, price }
+    // The code THIS branch stocks when the product goes by several (store brands).
+    const barcode = priced ? (priced.codeByStore?.[store.key] ?? priced.barcode) : ''
+    return { item, priced, price, barcode }
   })
 
   return (
@@ -377,7 +379,7 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
       </p>
 
       <ul className="flex flex-col gap-2">
-        {rows.map(({ item, priced, price }) => {
+        {rows.map(({ item, priced, price, barcode }) => {
           const cat = getCategory(item.category)
           return (
             <li key={item.id} className="rounded-2xl border border-edge p-3">
@@ -414,11 +416,11 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
               </div>
 
               {/* Weighed goods have no national barcode — you weigh them in the aisle. */}
-              {priced && priced.barcode && (
+              {barcode && (
                 <div className="mt-2 flex flex-col items-center gap-1">
-                  <Barcode code={priced.barcode} />
+                  <Barcode code={barcode} />
                   <span className="font-mono text-xs tracking-wider text-ink-muted">
-                    {priced.barcode}
+                    {barcode}
                   </span>
                 </div>
               )}
