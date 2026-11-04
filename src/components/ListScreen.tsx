@@ -205,15 +205,16 @@ export function ListScreen({ user, onSignOut }: Props) {
           type="button"
           onClick={toggleSplit}
           aria-pressed={splitByStore}
+          aria-label="לפי חנות"
           className={
-            'flex min-h-9 items-center gap-1.5 rounded-full px-3 text-sm font-medium transition active:scale-95 ' +
+            'flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full px-3 text-sm font-medium transition active:scale-95 ' +
             (splitByStore
               ? 'bg-accent text-on-accent'
               : 'bg-track text-ink-muted')
           }
         >
           <span aria-hidden>🏪</span>
-          <span>לפי חנות</span>
+          <span className="hidden min-[360px]:inline">לפי חנות</span>
         </button>
         <button
           type="button"
@@ -317,7 +318,7 @@ export function ListScreen({ user, onSignOut }: Props) {
             className="mx-auto flex min-h-14 w-full max-w-lg items-center justify-center gap-2 rounded-2xl bg-accent px-5 text-base font-bold text-on-accent shadow-lg transition active:scale-[0.98]"
           >
             סיימתי קנייה
-            <span className="rounded-full bg-card/20 px-2 py-0.5 text-sm">
+            <span className="rounded-full border border-current px-2 py-0.5 text-sm">
               {bought.length}
             </span>
           </button>

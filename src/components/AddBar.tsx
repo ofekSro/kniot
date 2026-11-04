@@ -1,6 +1,12 @@
 import { useMemo, useRef, useState } from 'react'
 import { getCategory, guessCategory, nameKeyOf } from '../lib/categories'
-import { linkOf, searchCatalog, type CatalogEntry } from '../lib/catalog'
+import {
+  linkOf,
+  nameMatches,
+  productKey,
+  searchCatalog,
+  type CatalogEntry,
+} from '../lib/catalog'
 import type { ProductLink } from '../lib/prices'
 import type { Favorite, HistoryEntry, Suggestion } from '../types'
 
@@ -24,7 +30,11 @@ interface Props {
 }
 
 const MAX_SUGGESTIONS = 6
-const MAX_CATALOG = 5
+const MAX_CATALOG = 6
+
+/** Favorite/history ids are exact keys; the typed text may be another spelling of them. */
+const matches = (id: string, name: string, key: string, typed: string) =>
+  id.startsWith(key) || nameMatches(name, typed)
 
 export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavorites }: Props) {
   const [query, setQuery] = useState('')
@@ -49,7 +59,7 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
     const out: Suggestion[] = []
 
     for (const f of favorites) {
-      if (f.id.startsWith(q) && !seen.has(f.id)) {
+      if (matches(f.id, f.name, q, query) && !seen.has(f.id)) {
         seen.add(f.id)
         out.push({
           nameKey: f.id,
@@ -65,7 +75,7 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
     const ranked = [...history].sort((a, b) => b.count - a.count)
     for (const h of ranked) {
       if (out.length >= MAX_SUGGESTIONS) break
-      if (h.id.startsWith(q) && !seen.has(h.id)) {
+      if (matches(h.id, h.name, q, query) && !seen.has(h.id)) {
         seen.add(h.id)
         out.push({
           nameKey: h.id,
@@ -82,28 +92,31 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
   }, [query, history, favorites])
 
   /**
-   * Concrete products from the chains' catalog, so the typed name gets pinned
-   * to exactly what should be priced ("מלפפון" the vegetable, not the pickles).
-   * Names already offered from favorites/history are skipped.
+   * Generic product names from the chains' files, one row per name. Picking one
+   * pins it ("מלפפון" the vegetable, not the pickles), and the job then computes each
+   * branch's price for it. Names already offered from favorites/history are skipped,
+   * including under another spelling.
    */
   const catalogRows = useMemo<Suggestion[]>(() => {
     if (!query.trim()) return []
-    const taken = new Set(suggestions.map((s) => s.nameKey))
+    const taken = new Set(suggestions.map((s) => productKey(s.name)))
     const out: Suggestion[] = []
-    for (const e of searchCatalog(catalog, query, MAX_CATALOG + MAX_SUGGESTIONS)) {
-      const key = nameKeyOf(e.name)
-      if (taken.has(key)) continue
-      taken.add(key)
+    for (const { entry, subLabel } of searchCatalog(catalog, query, MAX_CATALOG + MAX_SUGGESTIONS)) {
+      const same = productKey(entry.name)
+      if (taken.has(same)) continue
+      taken.add(same)
+      const key = nameKeyOf(entry.name)
       const known = historyByKey.get(key)
       out.push({
         nameKey: key,
-        name: e.name,
-        category: known?.category ?? guessCategory(e.name),
+        name: entry.name,
+        category: known?.category ?? guessCategory(entry.name),
         store: known?.store ?? null,
         qty: known?.lastQty ?? null,
         isFavorite: false,
-        product: linkOf(e),
-        chains: e.chains,
+        product: linkOf(entry),
+        hint: entry.weighed ? 'לפי משקל' : entry.count > 1 ? `${entry.count} מוצרים` : undefined,
+        subLabel,
       })
       if (out.length >= MAX_CATALOG) break
     }
@@ -139,7 +152,7 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
   const showSuggestions = focused && (suggestions.length > 0 || catalogRows.length > 0)
 
   return (
-    <div className="safe-top sticky top-0 z-30 border-b border-edge bg-app-bg/95 backdrop-blur">
+    <div className="safe-top sticky top-0 z-40 border-b border-edge bg-app-bg/95 backdrop-blur">
       <div className="flex items-center gap-2 px-3 py-2">
         <form
           className="relative flex-1"
@@ -199,7 +212,7 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
                     (suggestions.length > 0 ? 'border-t border-edge' : '')
                   }
                 >
-                  מוצרים מהרשתות — בחירה מצמידה מחיר מדויק
+                  מוצרים מהסופרים — המחיר יחושב בכל סופר
                 </li>
               )}
               {catalogRows.map((s) => (
@@ -208,17 +221,24 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
                     type="button"
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => void submitSuggestion(s)}
-                    className="flex min-h-12 w-full items-center gap-2.5 px-4 text-start transition active:bg-track"
+                    aria-label={s.name}
+                    className={
+                      'flex min-h-12 w-full items-center gap-2.5 py-1 pe-4 text-start transition active:bg-track ' +
+                      (s.subLabel ? 'ps-12' : 'ps-4')
+                    }
                   >
-                    <span aria-hidden>{s.product?.kind === 'weighed' ? '⚖️' : '🏷️'}</span>
-                    <span className="min-w-0 flex-1 truncate font-medium">{s.name}</span>
-                    <span className="shrink-0 text-xs text-ink-faint">
-                      {s.product?.kind === 'weighed'
-                        ? 'לפי משקל'
-                        : s.chains && s.chains.length === 1
-                          ? s.chains[0]
-                          : `${s.chains?.length ?? 0} רשתות`}
+                    {!s.subLabel && (
+                      <span aria-hidden>{s.product?.kind === 'weighed' ? '⚖️' : '🏷️'}</span>
+                    )}
+                    <span
+                      className={
+                        'line-clamp-2 min-w-0 flex-1 ' +
+                        (s.subLabel ? 'text-sm text-ink-muted' : 'font-medium')
+                      }
+                    >
+                      {s.subLabel ?? s.name}
                     </span>
+                    {s.hint && <span className="shrink-0 text-xs text-ink-faint">{s.hint}</span>}
                   </button>
                 </li>
               ))}

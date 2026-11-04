@@ -16,33 +16,35 @@ export interface PriceCandidate {
 }
 
 /**
- * What a list name is pinned to in config/trackedProducts.pins. Packaged goods
- * pin a national barcode; weighed goods (produce, deli) have a different code
- * per chain, so they pin a name that the job matches inside each branch file.
+ * What a list name is pinned to in config/trackedProducts.pins. A generic packaged
+ * name ('family') and a weighed one are matched by name inside each branch file;
+ * 'barcode' is one exact product (pins written by older builds).
  */
 export type ProductLink =
+  | { kind: 'family'; name: string }
+  | { kind: 'weighed'; name: string }
   | {
       kind: 'barcode'
       code: string
-      /** The same product under several codes (store brands); `code` is one of them. */
+      /** The same product under several codes; `code` is one of them. */
       codes?: string[]
       name: string
     }
-  | { kind: 'weighed'; name: string }
 
 export interface PricedItem {
   /** nameKey — matches the app's list items. */
   k: string
   /** The tracked list name at the time of the fetch. */
   n: string
-  /** Empty for weighed goods (their codes differ per chain). */
+  /** Empty when the code depends on the branch (see `variants`) or for weighed goods. */
   barcode: string
-  /** When one product was priced under several codes: all of them, and which one each branch stocks. */
-  codes?: string[]
-  codeByStore?: Record<string, string>
+  /** The concrete items behind the prices: `c` barcode, `n` the chain's name for it. */
+  variants?: { c: string; n: string }[]
+  /** branch key → index into `variants`: what that branch's price is for. */
+  pick?: Record<string, number>
   /** Canonical product that was actually priced. */
   product: string
-  kind?: 'barcode' | 'weighed'
+  kind?: 'barcode' | 'weighed' | 'family'
   /** 'kg' when prices are per kilogram (weighed goods). */
   unit?: 'kg'
   /** True when the user pinned this product (vs. the job's auto-pick). */
@@ -129,13 +131,15 @@ export interface ItemBreakdown {
   name: string
   /** The canonical product that was priced, when available. */
   product?: string
-  /** Quantity multiplier applied (parsed from the list item's qty). */
+  /** Multiplier applied to the unit price (see quantityOf). */
   qty: number
   /** 'kg' when the price is per kilogram. */
   unit?: 'kg'
   pinned?: boolean
   /** True when at least one store has a price for it. */
   priced: boolean
+  /** The job looked for it and no store in this city has it. */
+  notFound?: boolean
   cheapest?: { store: PriceStore; price: number }
   byStore?: Record<string, number>
 }
@@ -151,12 +155,43 @@ export interface Ranking {
   pricedCount: number
 }
 
-/** A leading whole number in a free-text qty ("2", "3 יח'") is a multiplier. */
-function qtyMultiplier(qty: string | null | undefined): number {
-  if (!qty) return 1
-  const m = qty.trim().match(/^(\d{1,2})(?!\d)/)
+/**
+ * How many unit prices a free-text qty amounts to. A leading whole number is a
+ * multiplier ("2", "3 יח'"). For goods priced per kg it is a weight instead: "500 גרם"
+ * is half a kilo, "1.5 ק״ג" is 1.5, and a count of pieces ("3 יח'") says nothing about
+ * the weight, so it stays one kilo.
+ */
+export function quantityOf(qty: string | null | undefined, unit?: 'kg'): number {
+  const text = qty?.trim()
+  if (!text) return 1
+  if (unit === 'kg') {
+    if (/יח/.test(text)) return 1
+    const m = text.match(/(\d+(?:[.,]\d+)?)\s*(ק["״׳']?ג|קילו|גרם|גר|ג)?/)
+    const value = m ? Number.parseFloat(m[1].replace(',', '.')) : 0
+    if (!(value > 0)) return 1
+    if (m?.[2]) return /^ג/.test(m[2]) ? value / 1000 : value
+    return value >= 50 ? value / 1000 : value // a bare "500" can only be grams
+  }
+  const m = text.match(/^(\d{1,2})(?!\d)/)
   const n = m ? Number.parseInt(m[1], 10) : 1
   return n > 0 && n <= 99 ? n : 1
+}
+
+/** A quantity priced per kg, in words: 0.5 → "500 גרם", 1.5 → "1.5 ק״ג". */
+export function weightLabel(kg: number): string {
+  return kg < 1 ? `${Math.round(kg * 1000)} גרם` : `${kg} ק״ג`
+}
+
+/** The concrete item a branch's price is for: its barcode and the chain's own name. */
+export function variantAt(
+  item: PricedItem,
+  storeKey: string,
+): { code: string; name: string } {
+  const index = item.pick?.[storeKey]
+  const variant = index == null ? undefined : item.variants?.[index]
+  return variant
+    ? { code: variant.c, name: variant.n }
+    : { code: item.barcode, name: item.product }
 }
 
 /**
@@ -178,7 +213,8 @@ export function rankBasket(
 
   const basket = active.map((a) => {
     const key = nameKeyOf(a.name)
-    return { a, key, priced: itemByKey.get(key), mult: qtyMultiplier(a.qty) }
+    const priced = itemByKey.get(key)
+    return { a, key, priced, mult: quantityOf(a.qty, priced?.unit) }
   })
   const pricedBasket = basket.filter(
     (b) => b.priced && Object.keys(b.priced.byStore).length > 0,
@@ -205,7 +241,7 @@ export function rankBasket(
 
   const items: ItemBreakdown[] = basket.map((b) => {
     if (!b.priced || Object.keys(b.priced.byStore).length === 0) {
-      return { key: b.key, name: b.a.name, qty: b.mult, priced: false }
+      return { key: b.key, name: b.a.name, qty: b.mult, priced: false, notFound: !!b.priced }
     }
     let cheapest: { store: PriceStore; price: number } | undefined
     for (const [sk, price] of Object.entries(b.priced.byStore)) {

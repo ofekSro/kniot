@@ -95,19 +95,23 @@ Vite to 7 — plugin-react 6 requires Vite 8; don't "upgrade" these.
   `splitByStore`) — applied pre-paint by the inline script in `index.html` (update it
   when adding such state). Firestore holds everything shared.
 - **RTL only**: logical properties/classes exclusively (`ps-`/`pe-`/`ms-`/`me-`,
-  `text-start`, `border-inline-start`). Touch targets ≥44px (`min-h-11`+).
+  `text-start`, `border-inline-start`). Touch targets ≥44px (`min-h-11`+). Text tokens reach
+  4.5:1 on every surface in every skin; keep that when touching `--sk-*` colors.
   `Sheet.tsx` is the shared bottom-sheet shell for all sheets.
 
 ## Price pipeline ("איפה הכי זול" — the 💰 button)
 
 Goal: rank Haifa supermarket branches by the couple's actual basket, to save money.
-Deliberately **serverless and credential-free**. Two data sources, each used for what
-it does *cleanly* (`scripts/fetchPrices.mjs`):
+Deliberately **serverless and credential-free** (`scripts/fetchPrices.mjs`).
 
-- **chp.co.il autocomplete → barcode.** The couple's items are generic ("חלב"), so each
-  is resolved to a concrete product barcode via `/autocompletion/product_extended` (clean
-  JSON, top hit unless a barcode is pinned). **Do NOT use chp's `compare_results` page for
-  prices**: after the first request per IP it CSS-obfuscates the results — text split
+**The core idea: the list holds GENERIC names, one per product.** The user was explicit: they
+want one name ("עגבניות", "משקה שיבולת שועל"), not the same product repeated per chain or per
+barcode, and the computation happens at the end. Do not bring back rows per barcode or chain
+labels in the add bar. Sources:
+
+- **chp.co.il autocomplete → a fallback barcode only**, for a name no branch file matches
+  (`/autocompletion/product_extended`, clean JSON). **Do NOT use chp's `compare_results` page
+  for prices**: after the first request per IP it CSS-obfuscates the results — text split
   across spans/divs with decoy digits/letters + zero-width chars — which corrupts even the
   prices and needs its randomized per-response CSS to undo. Autocomplete is not obfuscated.
 - **Government price-transparency portals → prices** (clean XML, one standard schema).
@@ -126,38 +130,50 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
   `<City>` (חיפה = 4000) instead of a name, so a branch matches by code
   (`scripts/cityCodes.json`, generated once from data.gov.il) OR by name substring over
   city+address+store name, with "קריית"→"קרית" folded.
-- **Weighed goods have no national barcode.** Produce/deli carry a different internal
-  code per chain, so they are matched **by name** inside each branch file among
-  `bIsWeighted=1` items (`parseWeighted`/`matchWeighed`: same normalized name → same
-  canonical product → product + further plain qualifier; qualifiers that change the
-  product ("אורגני", "ציפס", "שרי"…) are blocked). `normalizeName` folds finals and
-  "יי"→"י"; `canonicalWeighed` = stemmed words minus `NEUTRAL_STEMS` (ארוז, תפזורת,
-  יומי, ישראל, חממה…), so "עגבניה"/"עגבנייה"/"עגבניה יומי"/"עגבניות ישראל" are one
-  product — the catalog has one row per canonical product. Price is **per kg**
-  (`unit:'kg'`). An unpinned name is weighed when chp's top hit says "מחיר לפי משקל",
-  when chp knows nothing (then only a near-exact weighed name counts), or — for a name chp
-  resolved to a packaged barcode — when EXACT (not stem) weighed name matches cover at
-  least half as many branch files as the barcode does ("מלפפון" beats chp's pickles; one
-  chain's deli "שמנת חמוצה" does not hijack the packaged one; stems are too loose — "חלב"
-  stems like "חלבה").
-- **Product catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~60k rows
-  `[name, chainMask, barcodes?]` where barcodes is a string or, for one product sold under
-  several store-brand codes with the same name, an array; none = weighed): the app's add
-  bar offers concrete products from it (`lib/catalog.ts` `searchCatalog`, lazy-loaded by
-  `useCatalog` on first focus, cached by the SW `price-data` rule). **One row per
-  product, never per chain** — the user asked explicitly not to see "the same product
-  several times pinned to different chains". Picking one **pins** the nameKey
-  (`pins[k] = {kind:'barcode', code, codes?, name} | {kind:'weighed', name}`; legacy
-  bare-string pins = barcode) via `usePrices.pinProduct`; with `codes` the job prices
-  whichever code each branch stocks (cheapest) and records it in `codeByStore` so the
-  in-store view shows the right barcode.
+- **How a name is priced** (`kindOf` in `main`, decided after all files, by coverage):
+  - **Weighed** (`unit:'kg'`): produce/deli carry a different internal code per chain, so they
+    are matched by name among `bIsWeighted=1` items (`matchWeighed`: same name → same canonical
+    product → product + further plain qualifier, never a blocked one like "אורגני", "שרי").
+    An unpinned name is weighed when same-product weighed matches cover at least half as many
+    branch files as the packaged alternatives ("מלפפון" beats the pickles; one chain's deli
+    "שמנת חמוצה" does not hijack the packaged one).
+  - **Family** (the default for packaged goods): every item whose name fits the generic name
+    (`matchesFamily`). The name must START with it, because Hebrew puts the head noun first:
+    "שמפו ... שמן זית" is shampoo and "שוקולד חלב" is chocolate (this bug priced olive oil at a
+    shampoo's price). Only a word the file gives as `ManufactureName` may precede it
+    ("יטבתה שמנת חמוצה"). All branches are compared on **one pack size** (`familySize`: what
+    the name says, else the most widely stocked; `productSize` reads the name first, then
+    `Quantity`+`UnitQty`/`UnitOfMeasure`), and each branch's price is its cheapest item of that
+    size. `variants`+`pick` record which item that is per branch, so the in-store view can say
+    what to take and show its barcode. `FAMILY_BLOCK` excludes flavors and other changes of
+    product.
+  - **Barcode**: pinned by an older build, or chp's when nothing matches by name.
+- **Name folding** (`normalizeName`, `stemWord`, `productTokens`; mirrored for typing in
+  `lib/catalog.ts` — keep in sync): finals and "יי"→"י" folded, plural/singular stemmed, sizes
+  ("1ל", "750 גרם") and `NEUTRAL_STEMS` (ארוז, טרי, יומי, ישראל, מהדרין…) dropped, so
+  "עגבניה"/"עגבנייה"/"עגבניה יומי"/"עגבניות ישראל" are one product. `NO_STEM` keeps real
+  different words apart (חלבה≠חלב, שמנת≠שמן, לבנה≠לבן). Chains cut names at 20 chars; a
+  trailing half word is tolerated.
+- **Memory**: a string slice keeps its whole parent alive, so anything retained from a 40 MB
+  branch file must go through `own()` in `parseItems` (one uninterned field OOM-crashed the
+  full run at 2 GB). The full run fits in `--max-old-space-size=1200`; re-check when adding
+  retained data.
+- **Catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~18k rows, ~0.7 MB):
+  `families: [name, chainMask, productCount, weighed(0|1)][]`, a tree over product words where
+  a node is offered when several products share it (a node most of whose products continue
+  with one word collapses into it; one chain's stray listing is dropped). `lib/catalog.ts`
+  `searchCatalog`: the widest name first, up to 3 narrower sub-rows ("שרי", "מגי") when the name
+  is what was typed, then other names. Lazy-loaded by `useCatalog` on first focus, cached by
+  the SW `price-data` rule. Picking a row **pins** the nameKey via `usePrices.pinProduct`:
+  `pins[k] = {kind:'family'|'weighed', name}` (older `{kind:'barcode', code, codes?, name}` and
+  bare-string pins still work). A typed name needs no pin; the job prices it the same way.
 - `.github/workflows/prices.yml` runs nightly: reads `config/trackedProducts` (the public
-  Firestore doc) via unauthenticated REST, resolves barcodes ONCE (a barcode is national),
-  fetches portal prices **per tracked city**, and force-pushes `prices.json`, `catalog.json`
+  Firestore doc) via unauthenticated REST, fetches portal prices **per tracked city**, and
+  force-pushes `prices.json`, `catalog.json`
   and `branches.json` to the orphan `data` branch using the built-in `github.token` — **no
   service-account key, no secret**. Shape: `{updatedAt, cities:[...], byCity:{<city>:{city,
-  stores:[{key,chain,name,address}], items:[{k(nameKey), n, kind, barcode, codes?,
-  codeByStore?, product, unit?, pinned, byStore:{storeKey:price}, candidates}]}}, ...}` plus a
+  stores:[{key,chain,name,address}], items:[{k(nameKey), n, kind, barcode, variants?,
+  pick?, product, unit?, pinned, byStore:{storeKey:price}, candidates}]}}, ...}` plus a
   top-level single-city mirror
   (`city/stores/items` = first city) for older app builds. Keyed by **nameKey** so the app
   crosses its list items directly. `nameKeyOf` is duplicated in the script — keep it in sync
@@ -169,14 +185,16 @@ it does *cleanly* (`scripts/fetchPrices.mjs`):
   others. Seeded with `cities:["חיפה"]`; a new city takes effect on the next run.
 - **App side** (`lib/prices.ts`: `fetchPriceData`, `availableCities`, `cityData` → a
   per-city `PriceSlice`, `rankBasket(active, slice)` — pure, **coverage first then price**,
-  qty leading-integer as multiplier). `usePrices` owns the snapshot fetch (raw.githubusercontent,
+  `quantityOf`: a leading integer multiplies, and for per-kg goods the qty is a weight, so "500 גרם"
+  is 0.5). `usePrices` owns the snapshot fetch (raw.githubusercontent,
   CORS `*`, 5-min cache), the tracked-list sync, the selected city (localStorage `priceCity`),
-  and `addCity`. `PriceCheckSheet` (💰 header button): city switcher, ranking, and per-store
-  **"אני בסופר"** → an in-aisle list with each product's price + scannable **EAN-13 barcode**
-  (`Barcode.tsx`). City picker list is `lib/cities.ts`.
-- Not built yet: re-pinning an item that is already on the list (pins happen only when
-  picking a catalog row in the add bar; `candidates` exist but no picker in the sheet),
-  camera barcode scan, per-store totals inline on the main list, Victory group prices.
+  and `addCity`. `PriceCheckSheet` (💰 header button): city `<select>`, ranking (top 5, then "כל N
+  הסניפים"), and per-store **"אני בסופר"** → an in-aisle list with the exact product at that
+  branch (`variantAt`), its price + scannable **EAN-13 barcode** (`Barcode.tsx`). Its total must
+  equal the ranking's for that store. City picker list is `lib/cities.ts`.
+- Not built yet: choosing a specific brand for an item already on the list (`candidates` exist
+  but no picker in the sheet), camera barcode scan, per-store totals inline on the main list,
+  Victory group prices.
 
 ## Firebase config gotchas
 

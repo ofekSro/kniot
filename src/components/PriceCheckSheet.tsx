@@ -5,7 +5,10 @@ import { CATEGORIES, getCategory, nameKeyOf } from '../lib/categories'
 import { CITIES } from '../lib/cities'
 import {
   cityData,
+  quantityOf,
   rankBasket,
+  variantAt,
+  weightLabel,
   type PriceData,
   type PriceStore,
   type PricedItem,
@@ -27,6 +30,8 @@ interface Props {
 }
 
 const MEDALS = ['🥇', '🥈', '🥉']
+/** Branches shown before "הצגת כל הסניפים": the rest are for whoever wants them. */
+const TOP_STORES = 5
 
 function freshness(iso?: string): string {
   if (!iso) return ''
@@ -72,6 +77,7 @@ export function PriceCheckSheet({
   onAddCity,
 }: Props) {
   const [showItems, setShowItems] = useState(false)
+  const [showAllStores, setShowAllStores] = useState(false)
   const [store, setStore] = useState<PriceStore | null>(null)
   const [adding, setAdding] = useState(false)
   const [addedNote, setAddedNote] = useState<string | null>(null)
@@ -115,12 +121,12 @@ export function PriceCheckSheet({
       title={title}
       footer={
         <div className="flex items-center justify-between gap-3">
-          <span className="text-xs text-ink-faint">נתוני chp.co.il + שקיפות מחירים</span>
+          <span className="text-xs text-ink-faint">לפי נתוני שקיפות המחירים של הרשתות</span>
           <button
             type="button"
             onClick={onRefresh}
             disabled={refreshing}
-            className="min-h-9 rounded-full bg-track px-3 text-sm font-medium text-ink-muted transition active:scale-95 disabled:opacity-50"
+            className="min-h-11 rounded-full bg-track px-3 text-sm font-medium text-ink-muted transition active:scale-95 disabled:opacity-50"
           >
             {refreshing ? 'מרענן…' : 'רענון'}
           </button>
@@ -136,25 +142,27 @@ export function PriceCheckSheet({
         />
       ) : (
         <div className="flex flex-col gap-4">
-          {/* City switcher */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {cities.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => onCityChange(c)}
-                className={
-                  'min-h-8 rounded-full px-3 text-sm font-medium transition active:scale-95 ' +
-                  (c === city ? 'bg-accent text-on-accent' : 'bg-track text-ink-muted')
-                }
+          {/* City switcher: a list, because many cities can be tracked. */}
+          <div className="flex items-center gap-2">
+            {cities.length > 0 && (
+              <select
+                value={city}
+                onChange={(e) => onCityChange(e.target.value)}
+                aria-label="עיר"
+                className="min-h-11 min-w-0 flex-1 rounded-xl border border-edge-strong bg-field px-3 text-sm font-medium text-ink"
               >
-                {c}
-              </button>
-            ))}
+                {cities.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               type="button"
               onClick={() => setAdding((v) => !v)}
-              className="min-h-8 rounded-full border border-edge px-3 text-sm font-medium text-ink-muted transition active:scale-95"
+              aria-expanded={adding}
+              className="min-h-11 shrink-0 rounded-xl border border-edge px-3 text-sm font-medium text-ink-muted transition active:scale-95"
             >
               + עיר
             </button>
@@ -171,7 +179,7 @@ export function PriceCheckSheet({
                     key={c}
                     type="button"
                     onClick={() => void pickCity(c)}
-                    className="min-h-8 rounded-full bg-track px-3 text-sm text-ink-muted transition active:scale-95"
+                    className="min-h-11 rounded-full bg-track px-3 text-sm text-ink-muted transition active:scale-95"
                   >
                     {c}
                   </button>
@@ -188,6 +196,18 @@ export function PriceCheckSheet({
 
           {loading ? (
             <p className="py-10 text-center text-ink-faint">טוען מחירים…</p>
+          ) : active.length === 0 ? (
+            <div className="py-6 text-center">
+              <p className="text-lg font-medium">הרשימה ריקה</p>
+              <p className="mt-2 text-sm text-ink-muted">
+                הוסיפו מוצרים לרשימה כדי להשוות את המחיר שלהם בין הסופרים.
+              </p>
+            </div>
+          ) : !data ? (
+            <div className="py-6 text-center">
+              <p className="text-lg font-medium">לא הצלחנו לטעון את המחירים</p>
+              <p className="mt-2 text-sm text-ink-muted">בדקו את החיבור ולחצו על ״רענון״.</p>
+            </div>
           ) : ranking.stores.length === 0 ? (
             <div className="py-6 text-center">
               <p className="text-lg font-medium">אין עדיין מחירים ל{city}</p>
@@ -212,7 +232,7 @@ export function PriceCheckSheet({
               <div className="flex items-center justify-between text-xs text-ink-faint">
                 <span>{freshness(data?.updatedAt)}</span>
                 <span>
-                  {ranking.pricedCount} מתוך {ranking.basketCount} פריטים תומחרו
+                  {ranking.pricedCount} מתוך {ranking.basketCount} מוצרים תומחרו
                 </span>
               </div>
 
@@ -225,13 +245,25 @@ export function PriceCheckSheet({
                   <p className="mt-1 text-2xl font-bold text-ink">{shekel(best.total)}</p>
                   <p className="mt-1 text-xs text-ink-muted">
                     {best.covered} מתוך {ranking.pricedCount} מוצרים
-                    {best.covered < ranking.pricedCount && ` · חסרים ${best.missing.length}`}
                   </p>
+                  {best.missing.length > 0 && (
+                    <p className="mt-0.5 text-xs text-ink-muted">
+                      חסר בסניף: {best.missing.slice(0, 3).join(', ')}
+                      {best.missing.length > 3 && ` ועוד ${best.missing.length - 3}`}
+                    </p>
+                  )}
                 </div>
               )}
 
+              <p className="text-xs text-ink-faint">
+                {ranking.items.some((it) => it.priced && it.unit !== 'kg') &&
+                  'בכל סופר נלקח המוצר הזול ביותר באותו גודל. '}
+                {ranking.items.some((it) => it.priced && it.unit === 'kg') &&
+                  'מוצר במשקל מחושב לפי הכמות שכתבתם, או לפי ק״ג אחד אם לא כתבתם.'}
+              </p>
+
               <ol className="flex flex-col gap-1.5">
-                {ranking.stores.map((row, i) => {
+                {(showAllStores ? ranking.stores : ranking.stores.slice(0, TOP_STORES)).map((row, i) => {
                   const full = row.covered === ranking.pricedCount
                   return (
                     <li
@@ -262,7 +294,7 @@ export function PriceCheckSheet({
                       <button
                         type="button"
                         onClick={() => setStore(row.store)}
-                        className="shrink-0 rounded-full bg-card px-3 py-1.5 text-xs font-medium text-accent-ink ring-1 ring-edge transition active:scale-95"
+                        className="min-h-11 shrink-0 rounded-full bg-card px-3 text-xs font-medium text-accent-ink ring-1 ring-edge transition active:scale-95"
                       >
                         אני בסופר
                       </button>
@@ -270,6 +302,16 @@ export function PriceCheckSheet({
                   )
                 })}
               </ol>
+
+              {ranking.stores.length > TOP_STORES && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllStores((v) => !v)}
+                  className="min-h-11 rounded-xl border border-edge px-3 text-sm font-medium text-ink-muted transition active:scale-[0.99]"
+                >
+                  {showAllStores ? 'פחות סניפים' : `כל ${ranking.stores.length} הסניפים`}
+                </button>
+              )}
 
               {ranking.stores.some((r) => r.covered < ranking.pricedCount) && (
                 <p className="text-xs text-ink-faint">
@@ -281,7 +323,17 @@ export function PriceCheckSheet({
               <div>
                 <button
                   type="button"
-                  onClick={() => setShowItems((v) => !v)}
+                  onClick={(e) => {
+                    const button = e.currentTarget
+                    setShowItems((v) => !v)
+                    // What opens is below the fold; bring it into view.
+                    if (!showItems) {
+                      window.requestAnimationFrame(() =>
+                        button.scrollIntoView({ block: 'start', behavior: 'smooth' }),
+                      )
+                    }
+                  }}
+                  aria-expanded={showItems}
                   className="flex min-h-11 w-full items-center justify-between rounded-xl bg-track px-3 text-sm font-medium text-ink-muted transition active:scale-[0.99]"
                 >
                   <span>פירוט לפי מוצר</span>
@@ -298,7 +350,11 @@ export function PriceCheckSheet({
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">
                             {it.name}
-                            {it.qty > 1 && <span className="ms-1 text-ink-faint">×{it.qty}</span>}
+                            {it.unit === 'kg'
+                              ? it.qty !== 1 && (
+                                  <span className="ms-1 text-ink-faint">{weightLabel(it.qty)}</span>
+                                )
+                              : it.qty > 1 && <span className="ms-1 text-ink-faint">×{it.qty}</span>}
                           </p>
                           {it.priced ? (
                             <p className="truncate text-xs text-ink-faint">
@@ -311,16 +367,24 @@ export function PriceCheckSheet({
                               {it.unit === 'kg' && ' · לפי משקל'}
                             </p>
                           ) : (
-                            <p className="text-xs text-ink-faint">ממתין לעדכון</p>
+                            <p className="text-xs text-ink-faint">
+                              {it.notFound ? 'לא נמצא בסופרים בעיר' : 'ממתין לעדכון'}
+                            </p>
                           )}
                         </div>
                         {it.priced && it.cheapest && (
                           <div className="shrink-0 text-end">
                             <p className="text-sm font-bold">
-                              {shekel(it.cheapest.price * it.qty)}
-                              {perUnit(it.unit)}
+                              {it.unit === 'kg' && it.qty === 1
+                                ? shekel(it.cheapest.price) + perUnit(it.unit)
+                                : shekel(it.cheapest.price * it.qty)}
                             </p>
-                            <p className="text-xs text-ink-faint">{it.cheapest.store.chain}</p>
+                            <p className="text-xs text-ink-faint">
+                              {it.unit === 'kg' &&
+                                it.qty !== 1 &&
+                                `${shekel(it.cheapest.price)}${perUnit(it.unit)} · `}
+                              {it.cheapest.store.chain}
+                            </p>
                           </div>
                         )}
                       </li>
@@ -350,13 +414,14 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
   const rows = items.map((item) => {
     const priced = itemByKey.get(nameKeyOf(item.name))
     const price = priced?.byStore[store.key] ?? null
+    const amount = quantityOf(item.qty, priced?.unit)
     if (price != null) {
-      total += price
+      total += price * amount
       covered++
     }
-    // The code THIS branch stocks when the product goes by several (store brands).
-    const barcode = priced ? (priced.codeByStore?.[store.key] ?? priced.barcode) : ''
-    return { item, priced, price, barcode }
+    // What to actually take in THIS branch: a generic name is a different item per chain.
+    const variant = priced && price != null ? variantAt(priced, store.key) : null
+    return { item, priced, price, amount, variant }
   })
 
   return (
@@ -365,7 +430,7 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
         <button
           type="button"
           onClick={onBack}
-          className="min-h-9 rounded-full bg-track px-3 text-sm font-medium text-ink-muted transition active:scale-95"
+          className="min-h-11 rounded-full bg-track px-3 text-sm font-medium text-ink-muted transition active:scale-95"
         >
           → חזרה לדירוג
         </button>
@@ -379,7 +444,7 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
       </p>
 
       <ul className="flex flex-col gap-2">
-        {rows.map(({ item, priced, price, barcode }) => {
+        {rows.map(({ item, priced, price, amount, variant }) => {
           const cat = getCategory(item.category)
           return (
             <li key={item.id} className="rounded-2xl border border-edge p-3">
@@ -399,16 +464,30 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
                           ⚖️
                         </span>
                       )}
-                      {priced.product}
+                      {variant?.name ?? priced.product}
                       {priced.unit === 'kg' && ' · לפי משקל'}
                     </p>
                   ) : (
                     <p className="text-xs text-ink-faint">לא תומחר עדיין</p>
                   )}
                 </div>
-                <span className="shrink-0 text-sm font-bold">
+                <span className="shrink-0 text-end text-sm font-bold">
                   {price != null ? (
-                    shekel(price) + perUnit(priced?.unit)
+                    <>
+                      {shekel(price * amount)}
+                      {priced?.unit === 'kg' && (
+                        <span className="block text-xs font-normal text-ink-faint">
+                          {amount === 1
+                            ? 'לק״ג'
+                            : `${weightLabel(amount)} · ${shekel(price)}${perUnit(priced.unit)}`}
+                        </span>
+                      )}
+                      {priced?.unit !== 'kg' && amount > 1 && (
+                        <span className="block text-xs font-normal text-ink-faint">
+                          {amount} × {shekel(price)}
+                        </span>
+                      )}
+                    </>
                   ) : priced ? (
                     <span className="text-ink-faint">לא בסניף</span>
                   ) : null}
@@ -416,11 +495,11 @@ function StoreMode({ store, items, itemByKey, onBack }: StoreModeProps) {
               </div>
 
               {/* Weighed goods have no national barcode — you weigh them in the aisle. */}
-              {barcode && (
+              {variant?.code && (
                 <div className="mt-2 flex flex-col items-center gap-1">
-                  <Barcode code={barcode} />
+                  <Barcode code={variant.code} />
                   <span className="font-mono text-xs tracking-wider text-ink-muted">
-                    {barcode}
+                    {variant.code}
                   </span>
                 </div>
               )}

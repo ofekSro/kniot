@@ -3,27 +3,27 @@
  *
  * Data sources, each used for what it does cleanly:
  *
- *   1. chp.co.il autocomplete → turns the couple's GENERIC item names ("חלב")
- *      into a concrete product barcode + a few candidates. Clean JSON. (chp's
- *      price-comparison page is NOT used: it CSS-obfuscates results after the
- *      first request per IP, corrupting even the prices.)
- *
- *   2. The government price-transparency portals → the actual per-branch prices,
+ *   1. The government price-transparency portals → the actual per-branch prices,
  *      as clean XML: Shufersal's portal, the Cerberus portal
  *      (publishedprices.co.il — one public login per chain), Carrefour's portal
  *      and Hazi Hinam's blob listing.
  *
- * Two kinds of products:
- *   - PACKAGED goods carry a national barcode, so they are resolved once (chp or a
- *     user pin) and looked up by ItemCode in every branch file.
- *   - WEIGHED goods (produce, deli) have a DIFFERENT internal code per chain, so
- *     they are matched BY NAME inside each branch file among `bIsWeighted=1`
- *     items (price per kg): exact stem match first, then "<name> <qualifier>"
- *     with harmless qualifiers ("ארוז", "תפזורת") and never with ones that change
- *     the product ("אורגני", "ציפס", "שרי"…).
+ *   2. chp.co.il autocomplete → a fallback barcode for names no branch file knows
+ *      by name. Clean JSON. (chp's price-comparison page is NOT used: it
+ *      CSS-obfuscates results after the first request per IP, corrupting even the
+ *      prices.)
  *
- * The same branch files also feed a product CATALOG (catalog.json) so the app can
- * offer concrete products while typing and pin the chosen one.
+ * The couple's list holds GENERIC names ("משקה שיבולת שועל"), so a name is priced as:
+ *   - WEIGHED (produce, deli): chains give these a different internal code, so they
+ *     are matched by name among `bIsWeighted=1` items (price per kg).
+ *   - FAMILY (packaged): every item whose name contains the generic name. All chains
+ *     are compared on one pack size (the most widely stocked), and each branch's
+ *     price is its cheapest item of that size; the item itself is recorded per
+ *     branch so the in-store view can show what to take and its barcode.
+ *   - BARCODE: an exact code pinned earlier, or chp's when the name matches nothing.
+ *
+ * The same branch files also feed a catalog of generic names (catalog.json) that the
+ * app offers while typing.
  *
  * Local probe:
  *   node scripts/fetchPrices.mjs --cities "חיפה,תל אביב" --products "חלב,עגבניה" --out scripts/out
@@ -99,6 +99,7 @@ function unescapeHtml(s) {
     .replaceAll('&amp;', '&')
     .replaceAll('&quot;', '"')
     .replaceAll('&#39;', "'")
+    .replaceAll('&apos;', "'")
     .replaceAll('&lt;', '<')
     .replaceAll('&gt;', '>')
 }
@@ -157,12 +158,16 @@ export function normalizeName(s) {
     .trim()
 }
 
+/** Words whose "suffix" is part of a different word: חלבה≠חלב, שמנת≠שמן, לבנה≠לבן. */
+const NO_STEM = new Set(['חלבה', 'שמנת', 'לבנה'])
+
 /**
  * Crude singular/plural folding: "עגבניה"/"עגבניות" → "עגבני", "מלפפון"/"מלפפונים"
  * → "מלפפונ". Only strips when at least 3 letters remain ("תות" stays "תות").
  * Runs on normalized text, so the plural suffix is "ימ" (final מ already folded).
  */
 export function stemWord(w) {
+  if (NO_STEM.has(w)) return w
   for (const suf of ['ות', 'ימ', 'ה', 'ת']) {
     if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length)
   }
@@ -189,7 +194,7 @@ const NEUTRAL_STEMS = new Set(
   [
     'במשקל', 'תפזורת', 'בתפזורת', 'שקיל', 'ארוז', 'ארוזה', 'ארוזות', 'בקרטון', 'בשקית',
     'טרי', 'טריה', 'טריים', 'יומי', 'מובחר', 'פרימיום', 'איכותי', 'ישראלי', 'ישראל',
-    'מקומי', 'חממה', 'מהחממה',
+    'מקומי', 'חממה', 'מהחממה', 'קרטון', 'בקבוק', 'בבקבוק', 'שקית', 'מהדרין', 'בדץ', 'כשר', 'כשרה',
   ].map((w) => stemName(w)),
 )
 
@@ -208,27 +213,169 @@ export function canonicalWeighed(name) {
   return (kept.length ? kept : words).join(' ')
 }
 
+/** Words that only say how much: "1 ליטר", "750ג", "12 יח". */
+const UNIT_WORDS = new Set(
+  ['ל', 'ליטר', 'ליטרים', 'מל', 'מיליליטר', 'ג', 'גר', 'גרם', 'ק', 'קג', 'קילו', 'קילוגרם',
+    'יח', 'יחי', 'יחיד', 'יחידה', 'יחידות', 'מטר', 'מטרים', 'גליל', 'גלילים', 'רולים'].map(normalizeName),
+)
+const SIZE_WORD = /^\d+(?:ל|ליטר|מל|ג|גר|גרמ|ק|קג|קילו|יח|יחי|יחיד|יחידה|יחידות|מ|מטר)?$/
+const isSizeWord = (w) => UNIT_WORDS.has(w) || SIZE_WORD.test(w)
+
+const tokenCache = new Map()
+
 /**
- * Only the weighed (`bIsWeighted=1`) items of a price file — a few hundred per
- * branch — found by jumping to each flag instead of parsing every <Item>.
+ * What a product name says about WHAT it is: its words (`s`) and their stems (`t`),
+ * minus sizes and neutral qualifiers, so "משקה שיבולת שועל1ל" and "משקה שיבולת שועל
+ * 1 ליטר" are the same thing. Cached: branch files repeat the same names.
  */
-function parseWeighted(xml) {
+export function productTokens(name) {
+  const key = String(name)
+  const hit = tokenCache.get(key)
+  if (hit) return hit
+  const t = []
+  const s = []
+  for (const word of key.replace(/(\p{L})(\d)/gu, '$1 $2').split(/[\s,.\-/()+*:&;#!_=[\]|]+/)) {
+    const norm = normalizeName(word)
+    if (!norm || isSizeWord(norm)) continue
+    const stem = stemWord(norm)
+    if (NEUTRAL_STEMS.has(stem)) continue
+    t.push(stem)
+    s.push(word.replace(/^["'`״׳]+|["`״]+$/g, ''))
+  }
+  const out = { t, s }
+  tokenCache.set(key, out)
+  return out
+}
+
+/** One field of an <Item> block; handles `<Tag>`, `<Tag >` and an empty `<Tag />`. */
+function field(block, name) {
+  const needle = '<' + name
+  let at = block.indexOf(needle)
+  while (at !== -1) {
+    const next = block[at + needle.length]
+    if (next === '>' || next === ' ' || next === '/') break
+    at = block.indexOf(needle, at + 1)
+  }
+  if (at === -1) return ''
+  const gt = block.indexOf('>', at)
+  if (gt === -1 || block[gt - 1] === '/') return ''
+  const end = block.indexOf('<', gt + 1)
+  return end === -1 ? '' : block.slice(gt + 1, end).trim()
+}
+
+const interned = new Map()
+
+/** Every priced item of a branch file, in one pass. */
+export function parseItems(xml) {
+  // A slice keeps its whole parent string alive; names outlive the 20 MB file text.
+  const own = (str) => {
+    let v = interned.get(str)
+    if (v === undefined) {
+      v = Buffer.from(str).toString()
+      interned.set(v, v)
+    }
+    return v
+  }
   const out = []
-  let pos = 0
-  for (;;) {
-    const at = xml.indexOf('<bIsWeighted>1</bIsWeighted>', pos)
-    if (at === -1) break
-    pos = at + 20
-    const start = xml.lastIndexOf('<Item', at)
-    const end = xml.indexOf('</Item>', at)
-    if (start === -1 || end === -1) continue
-    const block = xml.slice(start, end)
-    const name = tag(block, 'ItemName')
-    const price = Number.parseFloat(tag(block, 'ItemPrice'))
-    if (!name || !Number.isFinite(price) || price <= 0) continue
-    out.push({ code: tag(block, 'ItemCode'), name, price, ...weighedQuery(name) })
+  let at = xml.indexOf('<ItemCode')
+  while (at !== -1) {
+    const next = xml.indexOf('<ItemCode', at + 9)
+    const block = xml.slice(at, next === -1 ? undefined : next)
+    at = next
+    const name = unescapeHtml(field(block, 'ItemName')).replace(/\s+/g, ' ').trim()
+    const price = Number.parseFloat(field(block, 'ItemPrice'))
+    if (name.length < 2 || !(price > 0)) continue
+    out.push({
+      code: own(field(block, 'ItemCode')),
+      name: own(name),
+      price,
+      weighed: field(block, 'bIsWeighted') === '1',
+      maker: own(field(block, 'ManufactureName')),
+      qty: field(block, 'Quantity'),
+      unitQty: field(block, 'UnitQty'),
+      uom: field(block, 'UnitOfMeasure'),
+    })
   }
   return out
+}
+
+function sizeKey(amount, unit) {
+  const a = Number.parseFloat(String(amount).replace(',', '.'))
+  if (!(a > 0)) return ''
+  const u = String(unit).replace(/["״׳']/g, '')
+  if (u.includes('מיליליטר') || u === 'מל') return 'ml' + Math.round(a)
+  if (u.includes('ליטר') || u === 'ל') return 'ml' + Math.round(a * 1000)
+  if (u.includes('קילו') || u === 'קג') return 'g' + Math.round(a * 1000)
+  if (u.includes('גרם') || u === 'גר' || u === 'ג') return 'g' + Math.round(a)
+  if (u.includes('יח') || u.includes('גליל') || u.includes('רול')) return 'u' + Math.round(a)
+  if (u.includes('מטר')) return 'm' + Math.round(a)
+  return ''
+}
+
+const NAME_SIZE = /(\d+(?:[.,]\d+)?)\s*(מ["״]?ל|מיליליטר|ליטרים|ליטר|ל|ק["״]?ג|קילוגרם|קילו|גרם|גר|ג|יחידות|יחידה|יחי|יח|גלילים|גליל|רולים)(?!\p{L})/u
+
+/** Pack size as a comparable key ("ml1000", "g750", "u12"). The name is printed on the pack, so it wins. */
+export function productSize(name, qty = '', unitQty = '', uom = '') {
+  const m = String(name).match(NAME_SIZE)
+  const fromName = m ? sizeKey(m[1], m[2]) : ''
+  if (fromName) return fromName
+  for (const unit of [unitQty, uom]) {
+    if (!unit || unit === 'לא ידוע') continue
+    const key = sizeKey(qty, unit)
+    // "1 גרם" / "1 מ״ל" is a placeholder, not a pack size.
+    if (key && !/^(ml|g)[01]$/.test(key)) return key
+  }
+  return ''
+}
+
+export function sizeLabel(key) {
+  const m = String(key).match(/^(ml|g|u|m)(\d+)$/)
+  if (!m) return ''
+  const v = Number(m[2])
+  if (m[1] === 'ml') return v >= 1000 ? `${v / 1000} ליטר` : `${v} מ״ל`
+  if (m[1] === 'g') return v >= 1000 ? `${v / 1000} ק״ג` : `${v} גרם`
+  if (m[1] === 'u') return v > 1 ? `${v} יח׳` : ''
+  return `${v} מטר`
+}
+
+/** Extras that make it a different thing than the generic name ("חלב בטעם תות"). */
+const FAMILY_BLOCK = [
+  'בטעם', 'טעם', 'מארז', 'מיני', 'מיקס', 'מבחר', 'ממרח', 'אבקת', 'מיץ', 'רסק', 'מחית',
+  'סלט', 'תבלין', 'שלוק', 'מיובש', 'כבוש', 'ברוטב', 'במלח', 'בחומץ',
+  'וניל', 'שוקולד', 'תות', 'מאצה', 'קפוצינו', 'קרמל', 'מנגו', 'אננס', 'אפרסק',
+].map((w) => stemWord(normalizeName(w)))
+
+function familyEnd(tokens, query, p, cut) {
+  for (let i = 0; i < query.length; i++) {
+    const t = tokens[p + i]
+    if (t === query[i]) continue
+    // The chain cut the name off mid-word here ("משקה שיבולת ש"); that still counts.
+    if (cut && i > 0 && p + i === tokens.length - 1 && t && query[i].startsWith(t)) return tokens.length
+    return -1
+  }
+  return p + query.length
+}
+
+const familyBlocked = (extras) => extras.some((x) => FAMILY_BLOCK.some((b) => x.startsWith(b)))
+
+/**
+ * Does a packaged item belong to the generic product `query` (stems)? The name must
+ * start with it: Hebrew puts the head noun first, so "שמפו ... שמן זית" is shampoo
+ * and "שוקולד חלב" is chocolate. Only a word the file itself gives as the
+ * manufacturer may come before it ("יטבתה שמנת חמוצה", maker יטבתה).
+ */
+export function matchesFamily(item, tokens, query) {
+  if (!query.length) return false
+  const cut = item.name.length >= 18 && item.name.length <= 24
+  const head = familyEnd(tokens, query, 0, cut)
+  if (head !== -1) return !familyBlocked(tokens.slice(head))
+  if (!tokens.includes(query[0])) return false // the common case, and it's hot
+  const maker = new Set(productTokens(item.maker ?? '').t)
+  for (let p = 0; p < tokens.length && maker.has(tokens[p]); p++) {
+    const end = familyEnd(tokens, query, p + 1, cut)
+    if (end !== -1) return !familyBlocked(tokens.slice(end))
+  }
+  return false
 }
 
 /** A product name prepared for matchWeighed. */
@@ -240,9 +387,7 @@ export function weighedQuery(name) {
  * Best weighed item for a product name: the same name (score 0), the same
  * product under another spelling ("עגבניות"/"עגבנייה"/"עגבניה יומי", 0.5), else
  * the product followed by further plain qualifiers (1 + extra words), never a
- * blocked one. Ties go to the cheaper item. Only score 0 is "exact": stems are
- * too loose to prove that an unpinned name meant produce ("חלב" stems like
- * "חלבה").
+ * blocked one. Ties go to the cheaper item.
  */
 export function matchWeighed(weighted, query) {
   const { norm, canon } = query
@@ -268,41 +413,24 @@ export function matchWeighed(weighted, query) {
   return best
 }
 
-/**
- * Pull only the wanted barcodes out of a price file. Instead of regex-scanning
- * every <Item> (tens of thousands per file), jump straight to each wanted code
- * with indexOf and read the ItemPrice in its surrounding <Item> block.
- */
-function parseWanted(xml, wanted) {
-  const out = []
-  for (const code of wanted) {
-    const at = xml.indexOf(`<ItemCode>${code}</ItemCode>`)
-    if (at === -1) continue
-    const start = xml.lastIndexOf('<Item', at)
-    const end = xml.indexOf('</Item>', at)
-    if (end === -1) continue
-    const block = xml.slice(start === -1 ? at : start, end)
-    const price = Number.parseFloat(tag(block, 'ItemPrice'))
-    if (Number.isFinite(price)) out.push({ code, price })
-  }
-  return out
-}
-
 // ---------------------------------------------------------------- product catalog
 
+const CATALOG_MAX_DEPTH = 5
+/** Words that cannot end a product name: the rest of the phrase was cut off. */
+const DANGLING = new Set(['בטעם', 'טעם', 'עם', 'ללא', 'בלי', 'של', 'על', 'את', 'או', 'לא', 'נטול', 'דל'].map((w) => stemWord(normalizeName(w))))
+
 /**
- * Union of every product seen in the branch files, for the app's "type → pick a
- * concrete product" suggestions. One row per PRODUCT, not per listing: weighed
- * goods merge across spellings (canonicalWeighed — their codes differ per chain
- * anyway) and packaged goods merge when the same name carries different
- * barcodes at different chains (store brands), keeping every code so the job
- * can price whichever one a branch stocks.
+ * The names the app offers while typing: GENERIC products, one row per name —
+ * never one row per barcode or per chain. Every product's words form a path in a
+ * tree ("משקה" → "שיבולת" → "שועל"); a node is offered when several products share
+ * it, so 23 oat-drink barcodes become the single row "משקה שיבולת שועל", and the
+ * job computes each branch's cheapest of them (matchesFamily). Weighed goods merge
+ * across spellings the same way, because sizes and neutral words are not in the path.
  */
 class Catalog {
   constructor() {
     this.chains = [] // index → display name
-    this.packaged = new Map() // code → { n, ch:Set<index> }
-    this.weighed = new Map() // canonical → { names: Map<name,count>, ch:Set<index> }
+    this.products = new Map() // barcode or weighed name → { name, names, weighed, mask }
     this.filesPerChain = {}
   }
 
@@ -317,62 +445,112 @@ class Catalog {
     return (this.filesPerChain[chainKey] ?? 0) < CATALOG_FILES_PER_CHAIN
   }
 
-  add(xml, chainKey, chainName) {
+  add(items, chainKey, chainName) {
     this.filesPerChain[chainKey] = (this.filesPerChain[chainKey] ?? 0) + 1
-    const ci = this.chainIndex(chainName)
-    const re = /<ItemCode\s*>([^<]*)<\/ItemCode\s*>[\s\S]*?<ItemName\s*>([^<]*)<\/ItemName\s*>[\s\S]*?<bIsWeighted\s*>(\d)/g
-    for (const m of xml.matchAll(re)) {
-      const code = m[1].trim()
-      const name = unescapeHtml(m[2]).replace(/\s+/g, ' ').trim()
-      if (!name || name.length < 2) continue
-      if (m[3] === '1') {
-        const key = canonicalWeighed(name)
-        if (!key) continue
-        let e = this.weighed.get(key)
-        if (!e) this.weighed.set(key, (e = { names: new Map(), ch: new Set() }))
-        e.names.set(name, (e.names.get(name) ?? 0) + 1)
-        e.ch.add(ci)
-      } else {
-        if (!/^\d{3,}$/.test(code)) continue
-        let e = this.packaged.get(code)
-        if (!e) this.packaged.set(code, (e = { n: name, ch: new Set() }))
-        // Chains truncate names differently; keep the most complete one.
-        if (name.length > e.n.length) e.n = name
-        e.ch.add(ci)
+    const bit = 1 << this.chainIndex(chainName)
+    for (const it of items) {
+      const { t } = productTokens(it.name)
+      if (!t.length) continue
+      if (!it.weighed && !/^\d{3,}$/.test(it.code)) continue
+      const id = it.weighed ? 'w' + t.join(' ') : 'c' + it.code
+      let e = this.products.get(id)
+      if (!e) {
+        this.products.set(id, (e = { name: it.name, maker: it.maker, names: new Map(), weighed: it.weighed, mask: 0 }))
       }
+      // Chains truncate names differently; keep the most complete one.
+      if (it.name.length > e.name.length) {
+        e.name = it.name
+        e.maker = it.maker
+      }
+      e.names.set(it.name, (e.names.get(it.name) ?? 0) + 1)
+      e.mask |= bit
     }
   }
 
-  /**
-   * Compact shape (tens of thousands of rows): `[name, chainMask, barcodes?]`,
-   * where chainMask has bit i set for `chains[i]`, barcodes is a string (one
-   * code) or an array (same product under several codes), and no barcode means
-   * weighed.
-   */
+  /** Compact shape: `families: [name, chainMask, productCount, weighed(0|1)][]`. */
   toJSON() {
-    const mask = (set) => [...set].reduce((m, i) => m | (1 << i), 0)
-    // Display the plainest spelling: fewest words, then most common, then shortest.
-    const display = (names) =>
-      [...names.entries()].sort(
-        (a, b) =>
-          a[0].split(' ').length - b[0].split(' ').length || b[1] - a[1] || a[0].length - b[0].length,
-      )[0][0]
-    const products = []
-    for (const e of this.weighed.values()) products.push([display(e.names), mask(e.ch)])
-    // Packaged: first the fullest name per barcode, then one row per name.
-    const byName = new Map() // normalized name → { names, codes, ch }
-    for (const [code, e] of this.packaged) {
-      const key = normalizeName(e.n)
-      let g = byName.get(key)
-      if (!g) byName.set(key, (g = { names: new Map(), codes: [], ch: new Set() }))
-      g.names.set(e.n, (g.names.get(e.n) ?? 0) + 1)
-      g.codes.push(code)
-      for (const i of e.ch) g.ch.add(i)
+    const products = [...this.products.values()]
+    // Cerberus chains cut names at 20 chars, leaving half words ("…שועל אור"). A last
+    // word only counts if it also appears somewhere it cannot have been cut.
+    const whole = new Set()
+    for (const e of products) {
+      const { t } = productTokens(e.name)
+      for (const x of e.name.length === 20 ? t.slice(0, -1) : t) whole.add(x)
     }
-    for (const g of byName.values()) {
-      products.push([display(g.names), mask(g.ch), g.codes.length === 1 ? g.codes[0] : g.codes])
+
+    // "אלפרו משקה שיבולת שועל" (maker אלפרו) belongs on the row "משקה שיבולת שועל", as
+    // in matchesFamily. A lone word after the brand stays put: "קוקה קולה זירו" ≠ "זירו".
+    const withoutMaker = (e) => {
+      const { t, s } = productTokens(e.name)
+      if (e.weighed) return { t, s }
+      const maker = new Set(productTokens(e.maker ?? '').t)
+      let lead = 0
+      while (lead < t.length && maker.has(t[lead])) lead++
+      return lead > 0 && t.length - lead >= 2 ? { t: t.slice(lead), s: s.slice(lead) } : { t, s }
     }
-    return { updatedAt: new Date().toISOString(), chains: this.chains, products }
+
+    const nodes = new Map()
+    for (const e of products) {
+      const path = withoutMaker(e)
+      let { t } = path
+      if (e.name.length === 20 && t.length > 1 && !whole.has(t[t.length - 1])) t = t.slice(0, -1)
+      for (let d = 1; d <= Math.min(t.length, CATALOG_MAX_DEPTH); d++) {
+        const key = t.slice(0, d).join(' ')
+        let n = nodes.get(key)
+        if (!n) nodes.set(key, (n = { key, count: 0, w: 0, plainW: false, mask: 0, surf: new Map(), maxKid: 0 }))
+        n.count++
+        n.mask |= e.mask
+        if (e.weighed) {
+          n.w++
+          if (d === t.length) n.plainW = true
+        }
+        if (e.weighed) {
+          for (const [nm, c] of e.names) {
+            const surface = productTokens(nm).s.slice(0, d).join(' ')
+            n.surf.set(surface, (n.surf.get(surface) ?? 0) + c)
+          }
+        } else {
+          const surface = path.s.slice(0, d).join(' ')
+          n.surf.set(surface, (n.surf.get(surface) ?? 0) + 1)
+        }
+      }
+    }
+    const siblingWords = new Map() // parent key → the words that continue it
+    for (const n of nodes.values()) {
+      const cut = n.key.lastIndexOf(' ')
+      if (cut === -1) continue
+      const parent = nodes.get(n.key.slice(0, cut))
+      if (parent) parent.maxKid = Math.max(parent.maxKid, n.count)
+      const parentKey = n.key.slice(0, cut)
+      if (!siblingWords.has(parentKey)) siblingWords.set(parentKey, [])
+      siblingWords.get(parentKey).push(n.key.slice(cut + 1))
+    }
+
+    const families = []
+    for (const n of nodes.values()) {
+      // A node most of whose products continue with one word is that word's node
+      // ("משקה שיבולת" → "משקה שיבולת שועל"), unless it is a plain produce name or a
+      // single word, which people do type on its own ("קוטג").
+      const dominated = n.key.includes(' ') && n.maxKid >= 2 && n.maxKid >= 0.5 * n.count && !n.plainW
+      if (dominated) continue
+      // Offered: what several products share, or a product alone under its first word.
+      if (n.count < 2 && !(n.maxKid === 0 && nodes.get(n.key.split(' ')[0]).count === 1)) continue
+      // One chain's stray listing ("עגבנ") is not worth offering; typing it still works.
+      let chainCount = 0
+      for (let bits = n.mask; bits > 0; bits >>= 1) chainCount += bits & 1
+      if (chainCount < 2 && n.count < 3) continue
+      const name = [...n.surf.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0]
+      if (name.length < 2) continue
+      const words = n.key.split(' ')
+      const lastWord = words[words.length - 1]
+      const tiny = /^[\u0590-\u05FF]{1,2}$/.test(lastWord)
+      if (words.length > 1 ? DANGLING.has(lastWord) || tiny : tiny && n.count < 5) continue
+      // A word cut off mid-way, with the whole word right beside it ("אור" / "אורגני").
+      const siblings = siblingWords.get(n.key.slice(0, n.key.lastIndexOf(' '))) ?? []
+      if (words.length > 1 && siblings.some((w) => w.length > lastWord.length && w.startsWith(lastWord))) continue
+      families.push([name, n.mask, n.count, n.plainW || n.w === n.count ? 1 : 0])
+    }
+    return { updatedAt: new Date().toISOString(), chains: this.chains, families }
   }
 }
 
@@ -639,7 +817,7 @@ async function readTracked(url) {
       const code = mf.code?.stringValue ?? ''
       const codes = (mf.codes?.arrayValue?.values ?? []).map((c) => c.stringValue).filter(Boolean)
       pins[k] = {
-        kind: mf.kind?.stringValue === 'weighed' ? 'weighed' : 'barcode',
+        kind: ['weighed', 'family'].includes(mf.kind?.stringValue) ? mf.kind.stringValue : 'barcode',
         code,
         codes: [...new Set([code, ...codes])].filter(Boolean),
         name: mf.name?.stringValue ?? '',
@@ -654,12 +832,11 @@ async function readTracked(url) {
 
 /**
  * Decide, per tracked product, how it will be priced:
- *   kind 'barcode'  — look the code up in every file (pinned, or chp's top hit)
- *   kind 'weighed'  — match by name among weighed items (pinned, or chp says
- *                     "מחיר לפי משקל", or chp knows nothing)
- *   kind 'auto'     — chp gave a packaged barcode for an unpinned name; if any
- *                     file has an EXACT weighed name match the name meant produce
- *                     ("מלפפון" → cucumbers, not pickles) and that wins.
+ *   kind 'weighed' — pinned produce name: matched by name among weighed items
+ *   kind 'family'  — pinned generic name: each branch's cheapest matching item
+ *   kind 'barcode' — pinned exact code, looked up in every file
+ *   kind 'auto'    — unpinned: decided after all files are read, by coverage
+ *                    (see kindOf in main); chp supplies only the fallback barcode.
  */
 async function resolveProducts(products, pins) {
   const resolved = []
@@ -667,44 +844,46 @@ async function resolveProducts(products, pins) {
   await mapLimit(products, 6, async (p) => {
     const k = p.k || nameKeyOf(p.n)
     const pin = pins[k]
-    try {
-      if (pin?.kind === 'weighed') {
-        const name = pin.name || p.n
-        resolved.push({ k, n: p.n, kind: 'weighed', name, product: name, pinned: true, candidates: [] })
-        return
-      }
-      if (pin?.code) {
-        const candidates = (await chpAutocomplete(pin.code)).slice(0, 6)
-        const product = pin.name || candidates.find((c) => c.barcode === pin.code)?.name || p.n
-        resolved.push({
-          k,
-          n: p.n,
-          kind: 'barcode',
-          barcode: pin.code,
-          // The same product under several store-brand codes: price whichever a branch has.
-          codes: pin.codes?.length ? pin.codes : [pin.code],
-          product,
-          pinned: true,
-          candidates,
-        })
-        return
-      }
-      const candidates = (await chpAutocomplete(p.n)).slice(0, 6)
-      const top = candidates[0]
-      if (!top) {
-        // Nothing known about the name: only a (near-)exact weighed name can price it.
-        resolved.push({ k, n: p.n, kind: 'weighed', name: p.n, product: p.n, strict: true, candidates })
-        return
-      }
-      if (/לפי משקל/.test(top.name)) {
-        const product = top.name.replace(/,?\s*מחיר לפי משקל/, '').trim()
-        resolved.push({ k, n: p.n, kind: 'weighed', name: p.n, product, candidates })
-        return
-      }
-      resolved.push({ k, n: p.n, kind: 'auto', barcode: top.barcode, name: p.n, product: top.name, candidates })
-    } catch (e) {
-      failures.push(`${p.n}: ${e.message}`)
+    if (pin?.kind === 'weighed' || pin?.kind === 'family') {
+      const name = pin.name || p.n
+      resolved.push({ k, n: p.n, kind: pin.kind, name, product: name, pinned: true, candidates: [] })
+      return
     }
+    if (pin?.code) {
+      resolved.push({
+        k,
+        n: p.n,
+        kind: 'barcode',
+        barcode: pin.code,
+        // The same product under several codes: price whichever a branch has.
+        codes: pin.codes?.length ? pin.codes : [pin.code],
+        product: pin.name || p.n,
+        pinned: true,
+        candidates: [],
+      })
+      return
+    }
+    let candidates = []
+    try {
+      candidates = (await chpAutocomplete(p.n)).slice(0, 6)
+    } catch (e) {
+      failures.push(`${p.n}: ${e.message}`) // chp is only a fallback; the name still gets priced
+    }
+    const top = candidates[0]
+    const chpWeighed = !!top && /לפי משקל/.test(top.name)
+    resolved.push({
+      k,
+      n: p.n,
+      kind: 'auto',
+      name: p.n,
+      product: p.n,
+      barcode: top && !chpWeighed ? top.barcode : undefined,
+      barcodeName: top?.name,
+      chpWeighed,
+      // Nothing known about the name: only a (near-)exact weighed name can price it.
+      strict: !top,
+      candidates,
+    })
   })
   return { resolved, failures }
 }
@@ -745,23 +924,29 @@ async function main() {
   const { resolved, failures: resolveFailures } = await resolveProducts(products, pins)
   const wantedBarcodes = new Set(resolved.flatMap((r) => r.codes ?? (r.barcode ? [r.barcode] : [])))
   const weighedQueries = resolved
-    .filter((r) => r.kind !== 'barcode')
+    .filter((r) => r.kind === 'weighed' || r.kind === 'auto')
     .map((r) => ({ k: r.k, strict: !!r.strict, ...weighedQuery(r.name) }))
     .filter((q) => q.canon)
-  console.log(
-    `resolved ${resolved.length}/${products.length} products ` +
-      `(barcode ${resolved.filter((r) => r.kind === 'barcode').length}, weighed ${resolved.filter((r) => r.kind === 'weighed').length}, auto ${resolved.filter((r) => r.kind === 'auto').length}); cities: ${cities.length}`,
-  )
+  const familyQueries = resolved
+    .filter((r) => r.kind === 'family' || r.kind === 'auto')
+    .map((r) => ({ k: r.k, tokens: productTokens(r.name).t }))
+    .filter((q) => q.tokens.length)
+  const kinds = ['barcode', 'weighed', 'family', 'auto'].map((x) => `${x} ${resolved.filter((r) => r.kind === x).length}`)
+  console.log(`resolved ${resolved.length}/${products.length} products (${kinds.join(', ')}); cities: ${cities.length}`)
 
   mkdirSync(outDir, { recursive: true })
   const failures = [...resolveFailures]
   const catalog = new Catalog()
-  // For 'auto' products: how many branch files priced the chp barcode vs. had
-  // an EXACT weighed name match. Decided after all files, by coverage, so one
-  // chain's deli "שמנת חמוצה" cannot hijack a packaged product that every store
-  // sells by barcode, while "מלפפון" (weighed everywhere) beats chp's pickles.
+  // For 'auto' products, per branch file: priced by the chp barcode / had this very
+  // produce by name (exact) / any weighed match / any packaged item of the family.
+  // Decided after all files, by coverage, so one chain's deli "שמנת חמוצה" cannot
+  // hijack what every store sells packaged, while "מלפפון" (weighed everywhere)
+  // beats the family of pickles.
   const barcodeHits = {}
   const exactHits = {}
+  const looseHits = {}
+  const familyHits = {}
+  const familySizeHits = {} // k → pack size → branch files stocking that size
   const autoByBarcode = new Map()
   for (const r of resolved) {
     if (r.kind !== 'auto') continue
@@ -771,7 +956,7 @@ async function main() {
 
   // Per-city accumulators.
   const acc = {}
-  for (const city of cities) acc[city] = { stores: [], priceByBarcode: {}, weighedByKey: {} }
+  for (const city of cities) acc[city] = { stores: [], priceByBarcode: {}, weighedByKey: {}, familyByKey: {} }
 
   // Gather every branch download across all cities into one task list.
   const tasks = [] // { city, branch, run: () => Promise<xml> }
@@ -823,39 +1008,105 @@ async function main() {
         name: t.branch.name || t.branch.id,
         address: t.branch.address ?? '',
       })
-      for (const it of parseWanted(xml, wantedBarcodes)) {
+      const fileItems = parseItems(xml)
+      for (const it of fileItems) {
+        if (!wantedBarcodes.has(it.code)) continue
         slice.priceByBarcode[it.code] ??= {}
         const prev = slice.priceByBarcode[it.code][key]
         if (prev == null || it.price < prev) slice.priceByBarcode[it.code][key] = it.price
         for (const k of autoByBarcode.get(it.code) ?? []) barcodeHits[k] = (barcodeHits[k] ?? 0) + 1
       }
       if (weighedQueries.length) {
-        const weighted = parseWeighted(xml)
+        const weighted = fileItems.filter((i) => i.weighed).map((i) => ({ ...i, ...weighedQuery(i.name) }))
         for (const q of weighedQueries) {
           const m = matchWeighed(weighted, q)
           if (!m || (q.strict && m.score > 0.5)) continue
           slice.weighedByKey[q.k] ??= {}
           slice.weighedByKey[q.k][key] = { price: m.price, name: m.name }
-          if (m.score === 0) exactHits[q.k] = (exactHits[q.k] ?? 0) + 1
+          looseHits[q.k] = (looseHits[q.k] ?? 0) + 1
+          if (m.score <= 0.5) exactHits[q.k] = (exactHits[q.k] ?? 0) + 1
         }
       }
-      if (catalog.wants(t.branch.chain)) catalog.add(xml, t.branch.chain, t.branch.chainName)
+      if (familyQueries.length) {
+        const sizesSeen = new Map() // k → Set of sizes in this file
+        for (const it of fileItems) {
+          if (it.weighed) continue
+          const { t: tokens } = productTokens(it.name)
+          for (const q of familyQueries) {
+            if (!matchesFamily(it, tokens, q.tokens)) continue
+            const size = productSize(it.name, it.qty, it.unitQty, it.uom)
+            slice.familyByKey[q.k] ??= {}
+            const bySize = (slice.familyByKey[q.k][key] ??= {})
+            if (!bySize[size] || it.price < bySize[size].price) {
+              bySize[size] = { price: it.price, code: it.code, name: it.name }
+            }
+            if (!sizesSeen.has(q.k)) sizesSeen.set(q.k, new Set())
+            sizesSeen.get(q.k).add(size)
+          }
+        }
+        for (const [k, sizes] of sizesSeen) {
+          familyHits[k] = (familyHits[k] ?? 0) + 1
+          familySizeHits[k] ??= {}
+          for (const size of sizes) familySizeHits[k][size] = (familySizeHits[k][size] ?? 0) + 1
+        }
+      }
+      if (catalog.wants(t.branch.chain)) catalog.add(fileItems, t.branch.chain, t.branch.chainName)
     } catch (e) {
       failures.push(`${t.city} ${t.branch.chainName} ${t.branch.id}: ${e.message}`)
     }
     if (++done % 50 === 0) console.log(`  …${done}/${tasks.length}`)
   })
 
-  const isWeighed = (r) =>
-    r.kind === 'weighed' ||
-    (r.kind === 'auto' && (exactHits[r.k] ?? 0) > 0 && (exactHits[r.k] ?? 0) >= 0.5 * (barcodeHits[r.k] ?? 0))
+  const kindOf = (r) => {
+    if (r.kind !== 'auto') return r.kind
+    const exact = exactHits[r.k] ?? 0
+    const family = familyHits[r.k] ?? 0
+    const barcode = barcodeHits[r.k] ?? 0
+    if (exact > 0 && exact >= 0.5 * Math.max(family, barcode)) return 'weighed'
+    if (r.chpWeighed && (looseHits[r.k] ?? 0) > 0) return 'weighed'
+    if (family > 0) return 'family'
+    if (barcode > 0) return 'barcode'
+    return 'weighed'
+  }
+
+  /** The one pack size a family is compared on: what the name says, else the most stocked. */
+  const familySize = (r) => {
+    const hits = familySizeHits[r.k] ?? {}
+    const named = productSize(r.name)
+    if (named && hits[named]) return named
+    let best = ''
+    let bestScore = -1
+    for (const [size, n] of Object.entries(hits)) {
+      const score = size ? n : n / 4 // an unknown size is a poor thing to compare on
+      if (score > bestScore) {
+        best = size
+        bestScore = score
+      }
+    }
+    return best
+  }
+
+  /** Per-branch prices that may come from different items: which item at which branch. */
+  const collectVariants = (entries) => {
+    const byStore = {}
+    const pick = {}
+    const variants = []
+    const indexByCode = new Map()
+    for (const [storeKey, v] of entries) {
+      byStore[storeKey] = v.price
+      if (!indexByCode.has(v.code)) indexByCode.set(v.code, variants.push({ c: v.code, n: v.name }) - 1)
+      pick[storeKey] = indexByCode.get(v.code)
+    }
+    return { byStore, pick, variants }
+  }
 
   const byCity = {}
   for (const city of cities) {
     const slice = acc[city]
     const items = resolved.map((r) => {
-      const weighed = isWeighed(r)
-      if (weighed) {
+      const kind = kindOf(r)
+      const common = { k: r.k, n: r.n, pinned: r.pinned ?? false, candidates: r.candidates }
+      if (kind === 'weighed') {
         const hits = slice.weighedByKey[r.k] ?? {}
         const byStore = {}
         const names = new Map()
@@ -864,41 +1115,37 @@ async function main() {
           names.set(h.name, (names.get(h.name) ?? 0) + 1)
         }
         const product = [...names.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? r.product
+        return { ...common, kind: 'weighed', unit: 'kg', barcode: '', product, byStore }
+      }
+      if (kind === 'family') {
+        const size = familySize(r)
+        const entries = Object.entries(slice.familyByKey[r.k] ?? {})
+          .filter(([, sizes]) => sizes[size])
+          .map(([sk, sizes]) => [sk, sizes[size]])
+        const label = productSize(r.name) === size ? '' : sizeLabel(size)
         return {
-          k: r.k,
-          n: r.n,
-          kind: 'weighed',
-          unit: 'kg',
+          ...common,
+          kind: 'family',
           barcode: '',
-          product,
-          pinned: r.pinned ?? false,
-          byStore,
-          candidates: r.candidates,
+          product: label ? `${r.name} · ${label}` : r.name,
+          ...collectVariants(entries),
         }
       }
-      // Several codes (store brands of one product): per branch, the cheapest
-      // one it stocks, remembering which so the in-store view can show it.
       const codes = r.codes ?? [r.barcode]
-      const byStore = {}
-      const codeByStore = {}
+      const best = new Map()
       for (const code of codes) {
         for (const [sk, price] of Object.entries(slice.priceByBarcode[code] ?? {})) {
-          if (byStore[sk] == null || price < byStore[sk]) {
-            byStore[sk] = price
-            codeByStore[sk] = code
-          }
+          if (!best.has(sk) || price < best.get(sk).price) best.set(sk, { price, code, name: r.product })
         }
       }
+      const { byStore, pick, variants } = collectVariants([...best])
       return {
-        k: r.k,
-        n: r.n,
+        ...common,
         kind: 'barcode',
         barcode: r.barcode,
-        ...(codes.length > 1 ? { codes, codeByStore } : {}),
-        product: r.product,
-        pinned: r.pinned ?? false,
+        ...(codes.length > 1 ? { pick, variants } : {}),
+        product: r.kind === 'auto' ? (r.barcodeName ?? r.product) : r.product,
         byStore,
-        candidates: r.candidates,
       }
     })
     byCity[city] = { city, stores: slice.stores, items }
@@ -925,7 +1172,7 @@ async function main() {
   const cat = catalog.toJSON()
   writeFileSync(join(outDir, 'catalog.json'), JSON.stringify(cat))
   console.log(
-    `\nwrote ${cities.length} cities, ${tasks.length} branches; catalog: ${cat.products.length} products from ${cat.chains.length} chains`,
+    `\nwrote ${cities.length} cities, ${tasks.length} branches; catalog: ${cat.families.length} names from ${cat.chains.length} chains`,
   )
   if (failures.length) console.log(`failures: ${failures.length} (first 8)\n  ` + failures.slice(0, 8).join('\n  '))
 }

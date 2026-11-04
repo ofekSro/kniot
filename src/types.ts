@@ -42,6 +42,8 @@ export interface Suggestion {
   isFavorite: boolean
   /** Set for catalog rows: the concrete product the name gets pinned to. */
   product?: ProductLink
-  /** Chains stocking a catalog row (shown as a hint). */
-  chains?: string[]
+  /** Short note beside a catalog row ("לפי משקל", "17 מוצרים"). */
+  hint?: string
+  /** Set for a narrower version of the row above it: just the words it adds. */
+  subLabel?: string
 }

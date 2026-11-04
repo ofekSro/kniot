@@ -16,7 +16,7 @@ export function ItemRow({ item, highlighted, onToggle, onOpen }: Props) {
       }
     >
       <label
-        className="flex min-h-12 shrink-0 cursor-pointer items-center ps-2 pe-1"
+        className="flex min-h-12 min-w-11 shrink-0 cursor-pointer items-center justify-center"
         onClick={(e) => e.stopPropagation()}
       >
         <input
