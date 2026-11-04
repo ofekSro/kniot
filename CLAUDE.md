@@ -107,7 +107,9 @@ Deliberately **serverless and credential-free** (`scripts/fetchPrices.mjs`).
 **The core idea: the list holds GENERIC names, one per product.** The user was explicit: they
 want one name ("עגבניות", "משקה שיבולת שועל"), not the same product repeated per chain or per
 barcode, and the computation happens at the end. Do not bring back rows per barcode or chain
-labels in the add bar. Sources:
+labels in the add bar. **Kinds are read off the data for every product, never special-cased**
+("זה צריך להיות ורסטילי"): a name's narrower catalog rows are its choices (see Choices below).
+Sources:
 
 - **chp.co.il autocomplete → a fallback barcode only**, for a name no branch file matches
   (`/autocompletion/product_extended`, clean JSON). **Do NOT use chp's `compare_results` page
@@ -141,19 +143,29 @@ labels in the add bar. Sources:
     (`matchesFamily`). The name must START with it, because Hebrew puts the head noun first:
     "שמפו ... שמן זית" is shampoo and "שוקולד חלב" is chocolate (this bug priced olive oil at a
     shampoo's price). Only a word the file gives as `ManufactureName` may precede it
-    ("יטבתה שמנת חמוצה"). All branches are compared on **one pack size** (`familySize`: what
-    the name says, else the most widely stocked; `productSize` reads the name first, then
+    ("יטבתה שמנת חמוצה"), or come inside it ("חלב תנובה 3%" is "חלב 3%"). Any other word in
+    between makes it another kind ("ביצים אומגה L" is not "ביצים L"), so don't loosen this into
+    "all words anywhere": that prices coconut oil from hair oil. All branches are compared on
+    **one pack size** (`familySize`: what the name says, else its parent's while that is well
+    stocked, else the most widely stocked; `productSize` reads the name first, then
     `Quantity`+`UnitQty`/`UnitOfMeasure`), and each branch's price is its cheapest item of that
     size. `variants`+`pick` record which item that is per branch, so the in-store view can say
     what to take and show its barcode. `FAMILY_BLOCK` excludes flavors and other changes of
-    product.
+    product, including a flavor cut mid-word by a 20-char name.
   - **Barcode**: pinned by an older build, or chp's when nothing matches by name.
 - **Name folding** (`normalizeName`, `stemWord`, `productTokens`; mirrored for typing in
   `lib/catalog.ts` — keep in sync): finals and "יי"→"י" folded, plural/singular stemmed, sizes
   ("1ל", "750 גרם") and `NEUTRAL_STEMS` (ארוז, טרי, יומי, ישראל, מהדרין…) dropped, so
   "עגבניה"/"עגבנייה"/"עגבניה יומי"/"עגבניות ישראל" are one product. `NO_STEM` keeps real
-  different words apart (חלבה≠חלב, שמנת≠שמן, לבנה≠לבן). Chains cut names at 20 chars; a
-  trailing half word is tolerated.
+  different words apart (חלבה≠חלב, שמנת≠שמן, לבנה≠לבן, ביצת≠ביצה). `GRADE_WORDS` folds one size
+  scale for any product (גדול/לארג'/L → `l`; the row shows the letter when any chain writes it),
+  `SAME_WORD` holds construct forms that really are the same word (ביצי=ביצים, תפוחי אדמה=תפוח
+  אדמה; a list, not a rule, because חלבי≠חלב),
+  and a percentage is one word however written ("%3", "3 %", "3% שומן"). "1.5 L" is liters while
+  "12 L" is a dozen of size L. Chains cut names at 20 chars; a trailing half word is tolerated.
+  Word order is kept on purpose: what decides the kind comes first ("ביצים אומגה 12 L"), and what
+  follows a size is mostly a color or brand ("כפפות ניטריל L שחור"). Moving sizes last was tried
+  and lost more than it fixed; the known cost is the rare "12 ביצים M אומגה 3" counting as M.
 - **Memory**: a string slice keeps its whole parent alive, so anything retained from a 40 MB
   branch file must go through `own()` in `parseItems` (one uninterned field OOM-crashed the
   full run at 2 GB). The full run fits in `--max-old-space-size=1200`; re-check when adding
@@ -161,12 +173,24 @@ labels in the add bar. Sources:
 - **Catalog** (`catalog.json`, same branch files, ≤6 files per chain, ~18k rows, ~0.7 MB):
   `families: [name, chainMask, productCount, weighed(0|1)][]`, a tree over product words where
   a node is offered when several products share it (a node most of whose products continue
-  with one word collapses into it; one chain's stray listing is dropped). `lib/catalog.ts`
-  `searchCatalog`: the widest name first, up to 3 narrower sub-rows ("שרי", "מגי") when the name
-  is what was typed, then other names. Lazy-loaded by `useCatalog` on first focus, cached by
-  the SW `price-data` rule. Picking a row **pins** the nameKey via `usePrices.pinProduct`:
-  `pins[k] = {kind:'family'|'weighed', name}` (older `{kind:'barcode', code, codes?, name}` and
-  bare-string pins still work). A typed name needs no pin; the job prices it the same way.
+  with one word collapses into it, unless a size or percentage is involved; one chain's stray
+  listing is dropped). A maker inside a name gives two paths, so "חלב תנובה 3%" is under both
+  "חלב 3%" and the brand "חלב תנובה". `weighed` needs something under the name sold by weight in
+  at least half the chains that have it, since it decides how a picked row is priced: one chain's
+  deli must not turn "שמנת חמוצה" into a price per kg. `lib/catalog.ts` `searchCatalog`: the widest name first, with its
+  choices when the name is what was typed, then other names. Lazy-loaded by `useCatalog` on first
+  focus, cached by the SW `price-data` rule. Picking a row **pins** the nameKey via
+  `usePrices.pinProduct`: `pins[k] = {kind:'family'|'weighed', name}` (older
+  `{kind:'barcode', code, codes?, name}` and bare-string pins still work). A typed name needs no
+  pin; the job prices it the same way.
+- **Choices** (`choicesOf`, `ChoiceChips`): a name's kinds are simply its catalog rows one step
+  narrower, sizes first in scale order, then percentages, then by how widely sold. Offered in the
+  add bar and, for a row already on the list, in `EditSheet` (`choiceLevel`: its own kinds, else
+  the ones beside it, so M can become L). A kind is just a narrower generic name, nothing else
+  changes. `choicesToPrice` in the job prices the choices around each tracked name ahead of time
+  (`--catalog` overrides the published catalog it reads them from), for the **first city only**
+  to keep prices.json small; `choicesOf` must stay the same selection. Elsewhere a picked kind
+  waits for the next run. They are extra `items`, invisible until the list has that nameKey.
 - `.github/workflows/prices.yml` runs nightly: reads `config/trackedProducts` (the public
   Firestore doc) via unauthenticated REST, fetches portal prices **per tracked city**, and
   force-pushes `prices.json`, `catalog.json`
@@ -192,9 +216,8 @@ labels in the add bar. Sources:
   הסניפים"), and per-store **"אני בסופר"** → an in-aisle list with the exact product at that
   branch (`variantAt`), its price + scannable **EAN-13 barcode** (`Barcode.tsx`). Its total must
   equal the ranking's for that store. City picker list is `lib/cities.ts`.
-- Not built yet: choosing a specific brand for an item already on the list (`candidates` exist
-  but no picker in the sheet), camera barcode scan, per-store totals inline on the main list,
-  Victory group prices.
+- Not built yet: pack size as a choice (typing "ביצים 30 יח" works, but nothing offers it),
+  camera barcode scan, per-store totals inline on the main list, Victory group prices.
 
 ## Firebase config gotchas
 

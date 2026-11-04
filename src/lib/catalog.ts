@@ -33,8 +33,8 @@ const CATALOG_URL = 'https://raw.githubusercontent.com/ofekSro/kniot/data/catalo
 
 const FINALS: Record<string, string> = { ך: 'כ', ם: 'מ', ן: 'נ', ף: 'פ', ץ: 'צ' }
 
-// foldWord and stemWord mirror normalizeName and stemWord in scripts/fetchPrices.mjs:
-// keep them in sync, or what was typed stops matching the job's names.
+// foldWord, stemWord and the word tables mirror normalizeName, stemWord and GRADE_WORDS in
+// scripts/fetchPrices.mjs: keep them in sync, or what was typed stops matching the job's names.
 function foldWord(word: string): string {
   return word
     .toLowerCase()
@@ -44,11 +44,10 @@ function foldWord(word: string): string {
     .replace(/יי/g, 'י')
 }
 
-/** Words whose "suffix" is part of a different word: חלבה≠חלב, שמנת≠שמן, לבנה≠לבן. */
-const NO_STEM = new Set(['חלבה', 'שמנת', 'לבנה'])
+/** Words whose "suffix" is part of a different word: חלבה≠חלב, שמנת≠שמן, לבנה≠לבן, ביצת≠ביצה. */
+const NO_STEM = new Set(['חלבה', 'שמנת', 'לבנה', 'ביצת'])
 
-/** "עגבניה"/"עגבניות" → "עגבני", "מלפפון"/"מלפפונים" → "מלפפונ". */
-function stemWord(word: string): string {
+function foldSuffix(word: string): string {
   if (NO_STEM.has(word)) return word
   for (const suffix of ['ות', 'ימ', 'ה', 'ת']) {
     if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
@@ -58,8 +57,29 @@ function stemWord(word: string): string {
   return word
 }
 
+/** One size scale however a chain words it, in scale order. */
+const GRADE_WORDS: Record<string, string[]> = {
+  s: ['קטן', 'קטנה', 'קטנים', 'קטנות', 'small'],
+  m: ['בינוני', 'בינונית', 'בינוניים', 'בינוניות', 'מדיום', 'medium'],
+  l: ['גדול', 'גדולה', 'גדולים', 'גדולות', 'לארג', 'large'],
+  xl: ['ענק', 'ענקית', 'ענקיים', 'ענקיות'],
+}
+const GRADES = Object.keys(GRADE_WORDS)
+const SAME_WORD = new Map<string, string>([['ביצי', 'ביצ'], ['תפוחי', 'תפוח']])
+for (const [grade, words] of Object.entries(GRADE_WORDS)) {
+  for (const w of words) SAME_WORD.set(foldSuffix(foldWord(w)), grade)
+}
+
+/** "עגבניה"/"עגבניות" → "עגבני", "מלפפון"/"מלפפונים" → "מלפפונ", "גדולות" → "l". */
+function stemWord(word: string): string {
+  const stem = foldSuffix(word)
+  return SAME_WORD.get(stem) ?? stem
+}
+
 function wordsOf(text: string): string[] {
   return text
+    .replace(/(^|[^\d])%(\d+(?:[.,]\d+)?)/g, '$1$2%') // "%3" is how files often write 3%
+    .replace(/(\d)\s+%/g, '$1%')
     .split(/[\s,.\-/()+*:&;#!_=[\]|]+/)
     .map(foldWord)
     .filter(Boolean)
@@ -136,10 +156,17 @@ export async function fetchCatalog(): Promise<Catalog | null> {
   }
 }
 
+/** A narrower kind of a product, as the chains' own names divide it. */
+export interface CatalogChoice {
+  entry: CatalogEntry
+  /** Just the words it adds to the name above it: "L", "3%", "בשמן". */
+  label: string
+}
+
 export interface CatalogRow {
   entry: CatalogEntry
-  /** Set for a narrower version of the row above it: just the words it adds. */
-  subLabel?: string
+  /** The kinds to choose from, when this name is what was typed. */
+  choices?: CatalogChoice[]
 }
 
 const startsWithStems = (stems: string[], prefix: string[]) =>
@@ -152,13 +179,78 @@ const containsStems = (stems: string[], part: string[]) => {
   return false
 }
 
-const MAX_SUB_ROWS = 3
+/**
+ * Sizes in scale order, then percentages ascending, then the rest by how widely sold.
+ * Only a choice that is that one word: "נטול לקטוז 2%" is not a percentage.
+ */
+function choiceOrder(added: string[]): number {
+  const rest = GRADES.length + 1
+  if (added.length !== 1) return rest
+  const grade = GRADES.indexOf(added[0])
+  if (grade !== -1) return grade
+  const percent = /^(\d+)%$/.exec(added[0])
+  return percent ? GRADES.length + Number(percent[1]) / 1000 : rest
+}
 
 /**
- * Names matching what was typed. The most widely sold one comes first, then up to a
- * few narrower versions of it when the name is what was typed ("חלב" → 3%, עמיד…),
- * then other names. Names that merely repeat the first one behind another word
- * ("אלפרו משקה שיבולת שועל") are dropped: picking the first one covers them.
+ * The kinds one step below a name, read off the catalog so that any product gets its
+ * own: sizes for gloves, percentages for milk, "בשמן"/"במים" for tuna. A row under
+ * another offered row waits for that one ("ביצים אומגה L" under "ביצים אומגה"). Same
+ * selection as choicesToPrice in scripts/fetchPrices.mjs.
+ */
+export function choicesOf(
+  entries: readonly CatalogEntry[],
+  parent: CatalogEntry,
+): CatalogChoice[] {
+  const below = entries.filter(
+    (e) => e.stems.length > parent.stems.length && startsWithStems(e.stems, parent.stems),
+  )
+  const order = (e: CatalogEntry) => choiceOrder(e.stems.slice(parent.stems.length))
+  return below
+    .filter(
+      (e) => !below.some((o) => o.stems.length < e.stems.length && startsWithStems(e.stems, o.stems)),
+    )
+    .sort(
+      (a, b) => order(a) - order(b) || b.chainCount - a.chainCount || b.count - a.count,
+    )
+    .map((entry) => ({
+      entry,
+      label: entry.name.split(' ').slice(parent.stems.length).join(' ') || entry.name,
+    }))
+}
+
+export interface ChoiceLevel {
+  /** The wider name, to go back to, when this one is itself a kind of something. */
+  parent: CatalogEntry | null
+  choices: CatalogChoice[]
+  /** productKey of the choice this name already is. */
+  selected: string | null
+}
+
+/**
+ * What to offer for a name already on the list: its own kinds, or, once it has none
+ * left to narrow to, the kinds beside it, so that M can still become L.
+ */
+export function choiceLevel(entries: readonly CatalogEntry[], name: string): ChoiceLevel {
+  const none: ChoiceLevel = { parent: null, choices: [], selected: null }
+  const key = productKey(name)
+  const self = entries.find((e) => e.stems.join(' ') === key)
+  if (!self) return none
+  let parent: CatalogEntry | null = null
+  for (const e of entries) {
+    if (e.stems.length >= self.stems.length || !startsWithStems(self.stems, e.stems)) continue
+    if (!parent || e.stems.length > parent.stems.length) parent = e
+  }
+  const own = choicesOf(entries, self)
+  if (own.length > 0) return { parent, choices: own, selected: null }
+  return parent ? { parent, choices: choicesOf(entries, parent), selected: key } : none
+}
+
+/**
+ * Names matching what was typed. The most widely sold one comes first, with its kinds
+ * when the name is what was typed ("חלב" → 3%, עמיד…), then other names. Names that
+ * merely repeat the first one behind another word ("אלפרו משקה שיבולת שועל") are
+ * dropped: picking the first one covers them.
  */
 export function searchCatalog(
   entries: readonly CatalogEntry[],
@@ -191,7 +283,6 @@ export function searchCatalog(
 
   const first = matches[0]
   const rest = matches.slice(1).filter((m) => m.head || !first.head || q.words.length === 1)
-  const children = rest.filter((m) => m.head && startsWithStems(m.e.stems, first.e.stems))
   const others: typeof matches = []
   for (const m of rest) {
     if (startsWithStems(m.e.stems, first.e.stems) || containsStems(m.e.stems, first.e.stems)) continue
@@ -199,15 +290,11 @@ export function searchCatalog(
     others.push(m)
   }
 
-  const rows: CatalogRow[] = [{ entry: first.e }]
-  if (first.exact || others.length === 0) {
-    for (const m of children.slice(0, MAX_SUB_ROWS)) {
-      rows.push({
-        entry: m.e,
-        subLabel: m.e.name.split(' ').slice(first.e.stems.length).join(' ') || m.e.name,
-      })
-    }
-  }
+  const rows: CatalogRow[] = [
+    first.exact || others.length === 0
+      ? { entry: first.e, choices: choicesOf(entries, first.e) }
+      : { entry: first.e },
+  ]
   for (const m of others) {
     if (rows.length >= limit) break
     rows.push({ entry: m.e })

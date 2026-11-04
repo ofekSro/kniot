@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { CATEGORIES } from '../lib/categories'
+import { choiceLevel, linkOf, type CatalogEntry } from '../lib/catalog'
+import type { ProductLink } from '../lib/prices'
 import { STORES, storeForCategory, isStoreId } from '../lib/stores'
+import { ChoiceChips } from './ChoiceChips'
 import { Sheet } from './Sheet'
 import type { Item } from '../types'
 import type { ItemDraft } from '../hooks/useItems'
@@ -8,8 +11,12 @@ import type { ItemDraft } from '../hooks/useItems'
 interface Props {
   item: Item | null
   isFavorite: boolean
+  /** The product catalog, for the kinds to choose from (empty until loaded). */
+  catalog: readonly CatalogEntry[]
+  onOpenCatalog: () => void
   onClose: () => void
-  onSave: (id: string, patch: Partial<ItemDraft>) => Promise<void>
+  /** `product` is set when the name was picked from the catalog, to pin for pricing. */
+  onSave: (id: string, patch: Partial<ItemDraft>, product?: ProductLink) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onToggleFavorite: (fav: {
     name: string
@@ -24,12 +31,15 @@ const fieldClass =
 export function EditSheet({
   item,
   isFavorite,
+  catalog,
+  onOpenCatalog,
   onClose,
   onSave,
   onDelete,
   onToggleFavorite,
 }: Props) {
   const [name, setName] = useState('')
+  const [product, setProduct] = useState<ProductLink | undefined>(undefined)
   const [category, setCategory] = useState('other')
   const [store, setStore] = useState('super')
   const [qty, setQty] = useState('')
@@ -40,12 +50,16 @@ export function EditSheet({
   useEffect(() => {
     if (!item) return
     setName(item.name)
+    setProduct(undefined)
     setCategory(item.category)
     setStore(isStoreId(item.store) ? item.store : storeForCategory(item.category))
     setQty(item.qty ?? '')
     setNote(item.note ?? '')
     setConfirmDelete(false)
-  }, [item])
+    onOpenCatalog()
+  }, [item, onOpenCatalog])
+
+  const level = useMemo(() => choiceLevel(catalog, name), [catalog, name])
 
   if (!item) return null
   const current = item
@@ -53,13 +67,17 @@ export function EditSheet({
   async function save() {
     const trimmed = name.trim()
     if (!trimmed) return
-    await onSave(current.id, {
-      name: trimmed,
-      category,
-      store,
-      qty: qty.trim() || null,
-      note: note.trim() || null,
-    })
+    await onSave(
+      current.id,
+      {
+        name: trimmed,
+        category,
+        store,
+        qty: qty.trim() || null,
+        note: note.trim() || null,
+      },
+      product,
+    )
     onClose()
   }
 
@@ -111,10 +129,35 @@ export function EditSheet({
           <input
             className={fieldClass}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              setName(e.target.value)
+              setProduct(undefined)
+            }}
             autoComplete="off"
           />
         </Field>
+
+        {level.choices.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink-muted">סוג</span>
+            <ChoiceChips
+              key={level.parent?.name ?? name}
+              choices={level.choices}
+              selected={level.selected}
+              widen={
+                level.parent && {
+                  label: `כל סוגי ${level.parent.name}`,
+                  entry: level.parent,
+                }
+              }
+              onPick={(entry) => {
+                setName(entry.name)
+                setProduct(linkOf(entry))
+              }}
+            />
+            <p className="text-xs text-ink-faint">המחיר יושווה רק על מה שבחרתם.</p>
+          </div>
+        )}
 
         <Field label="קטגוריה">
           <select

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { getCategory, guessCategory, nameKeyOf } from '../lib/categories'
 import {
   linkOf,
@@ -9,6 +9,7 @@ import {
 } from '../lib/catalog'
 import type { ProductLink } from '../lib/prices'
 import type { Favorite, HistoryEntry, Suggestion } from '../types'
+import { ChoiceChips } from './ChoiceChips'
 
 interface Props {
   history: readonly HistoryEntry[]
@@ -91,23 +92,11 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
     return out.slice(0, MAX_SUGGESTIONS)
   }, [query, history, favorites])
 
-  /**
-   * Generic product names from the chains' files, one row per name. Picking one
-   * pins it ("מלפפון" the vegetable, not the pickles), and the job then computes each
-   * branch's price for it. Names already offered from favorites/history are skipped,
-   * including under another spelling.
-   */
-  const catalogRows = useMemo<Suggestion[]>(() => {
-    if (!query.trim()) return []
-    const taken = new Set(suggestions.map((s) => productKey(s.name)))
-    const out: Suggestion[] = []
-    for (const { entry, subLabel } of searchCatalog(catalog, query, MAX_CATALOG + MAX_SUGGESTIONS)) {
-      const same = productKey(entry.name)
-      if (taken.has(same)) continue
-      taken.add(same)
+  const suggestionOf = useCallback(
+    (entry: CatalogEntry): Suggestion => {
       const key = nameKeyOf(entry.name)
       const known = historyByKey.get(key)
-      out.push({
+      return {
         nameKey: key,
         name: entry.name,
         category: known?.category ?? guessCategory(entry.name),
@@ -116,12 +105,31 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
         isFavorite: false,
         product: linkOf(entry),
         hint: entry.weighed ? 'לפי משקל' : entry.count > 1 ? `${entry.count} מוצרים` : undefined,
-        subLabel,
-      })
+      }
+    },
+    [historyByKey],
+  )
+
+  /**
+   * Generic product names from the chains' files, one row per name. Picking one
+   * pins it ("מלפפון" the vegetable, not the pickles), and the job then computes each
+   * branch's price for it. Names already offered from favorites/history are skipped,
+   * including under another spelling, but their kinds are still offered.
+   */
+  const catalogRows = useMemo<Suggestion[]>(() => {
+    if (!query.trim()) return []
+    const taken = new Set(suggestions.map((s) => productKey(s.name)))
+    const out: Suggestion[] = []
+    for (const { entry, choices } of searchCatalog(catalog, query, MAX_CATALOG + MAX_SUGGESTIONS)) {
+      const same = productKey(entry.name)
+      const repeated = taken.has(same)
+      if (repeated && !choices?.length) continue
+      taken.add(same)
+      out.push({ ...suggestionOf(entry), choices, choicesOnly: repeated })
       if (out.length >= MAX_CATALOG) break
     }
     return out
-  }, [query, catalog, suggestions, historyByKey])
+  }, [query, catalog, suggestions, suggestionOf])
 
   /** A typed name reuses its history entry; otherwise the keyword guesser runs. */
   async function submitTyped() {
@@ -217,29 +225,31 @@ export function AddBar({ history, favorites, catalog, onFocus, onAdd, onOpenFavo
               )}
               {catalogRows.map((s) => (
                 <li key={'cat:' + s.nameKey}>
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => void submitSuggestion(s)}
-                    aria-label={s.name}
-                    className={
-                      'flex min-h-12 w-full items-center gap-2.5 py-1 pe-4 text-start transition active:bg-track ' +
-                      (s.subLabel ? 'ps-12' : 'ps-4')
-                    }
-                  >
-                    {!s.subLabel && (
-                      <span aria-hidden>{s.product?.kind === 'weighed' ? '⚖️' : '🏷️'}</span>
-                    )}
-                    <span
-                      className={
-                        'line-clamp-2 min-w-0 flex-1 ' +
-                        (s.subLabel ? 'text-sm text-ink-muted' : 'font-medium')
-                      }
+                  {!s.choicesOnly && (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => void submitSuggestion(s)}
+                      aria-label={s.name}
+                      className="flex min-h-12 w-full items-center gap-2.5 px-4 py-1 text-start transition active:bg-track"
                     >
-                      {s.subLabel ?? s.name}
-                    </span>
-                    {s.hint && <span className="shrink-0 text-xs text-ink-faint">{s.hint}</span>}
-                  </button>
+                      <span aria-hidden>{s.product?.kind === 'weighed' ? '⚖️' : '🏷️'}</span>
+                      <span className="line-clamp-2 min-w-0 flex-1 font-medium">{s.name}</span>
+                      {s.hint && <span className="shrink-0 text-xs text-ink-faint">{s.hint}</span>}
+                    </button>
+                  )}
+                  {!!s.choices?.length && (
+                    <div className="flex flex-col gap-1.5 px-4 pt-1 pb-3">
+                      <p className="text-xs text-ink-faint">
+                        {s.choicesOnly ? `סוגים של ${s.name}:` : 'או סוג מסוים:'}
+                      </p>
+                      <ChoiceChips
+                        key={s.nameKey}
+                        choices={s.choices}
+                        onPick={(entry) => void submitSuggestion(suggestionOf(entry))}
+                      />
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>

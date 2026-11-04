@@ -3,7 +3,7 @@ import type { User } from 'firebase/auth'
 import { CATEGORIES, nameKeyOf } from '../lib/categories'
 import { STORES, isStoreId, storeForCategory } from '../lib/stores'
 import type { ProductLink } from '../lib/prices'
-import { useItems } from '../hooks/useItems'
+import { useItems, type ItemDraft } from '../hooks/useItems'
 import { useHistory } from '../hooks/useHistory'
 import { useFavorites } from '../hooks/useFavorites'
 import { useOnline } from '../hooks/useOnline'
@@ -121,6 +121,19 @@ export function ListScreen({ user, onSignOut }: Props) {
       }
     },
     [addItem, flash, pinProduct],
+  )
+
+  const handleSaveEdit = useCallback(
+    async (id: string, patch: Partial<ItemDraft>, product?: ProductLink) => {
+      // A kind picked from the catalog is pinned like one picked in the add bar.
+      if (product && patch.name) {
+        void pinProduct(nameKeyOf(patch.name), product).catch(() => {
+          // Offline writes queue in the Firestore cache; a denial is non-fatal.
+        })
+      }
+      await updateItem(id, patch)
+    },
+    [updateItem, pinProduct],
   )
 
   const historyByKey = useMemo(
@@ -328,8 +341,10 @@ export function ListScreen({ user, onSignOut }: Props) {
       <EditSheet
         item={editing}
         isFavorite={editing ? isFavorite(editing.name) : false}
+        catalog={catalog}
+        onOpenCatalog={ensureCatalog}
         onClose={() => setEditing(null)}
-        onSave={updateItem}
+        onSave={handleSaveEdit}
         onDelete={deleteItem}
         onToggleFavorite={toggleFavorite}
       />

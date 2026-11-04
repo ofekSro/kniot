@@ -1,4 +1,5 @@
 import type { Timestamp } from 'firebase/firestore'
+import type { CatalogChoice } from './lib/catalog'
 import type { ProductLink } from './lib/prices'
 
 export interface Item {
@@ -44,6 +45,8 @@ export interface Suggestion {
   product?: ProductLink
   /** Short note beside a catalog row ("לפי משקל", "17 מוצרים"). */
   hint?: string
-  /** Set for a narrower version of the row above it: just the words it adds. */
-  subLabel?: string
+  /** The kinds to choose from under this name ("M", "L", "אומגה"). */
+  choices?: readonly CatalogChoice[]
+  /** The same name is already offered from history or favorites: only its kinds are new. */
+  choicesOnly?: boolean
 }

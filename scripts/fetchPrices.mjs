@@ -158,8 +158,42 @@ export function normalizeName(s) {
     .trim()
 }
 
-/** Words whose "suffix" is part of a different word: חלבה≠חלב, שמנת≠שמן, לבנה≠לבן. */
-const NO_STEM = new Set(['חלבה', 'שמנת', 'לבנה'])
+/**
+ * Words whose "suffix" is part of a different word: חלבה≠חלב, שמנת≠שמן, לבנה≠לבן,
+ * ביצת (הפתעה)≠ביצה.
+ */
+const NO_STEM = new Set(['חלבה', 'שמנת', 'לבנה', 'ביצת'])
+
+function foldSuffix(w) {
+  if (NO_STEM.has(w)) return w
+  for (const suf of ['ות', 'ימ', 'ה', 'ת']) {
+    if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length)
+  }
+  return w
+}
+
+/**
+ * One size scale, however a chain words it, for any product: "ביצים 12 יח גדול L",
+ * "ביצים לארג'" and "כפפות L" all say L. Without this each wording would be its own
+ * choice in the app. Mirrored in src/lib/catalog.ts.
+ */
+const GRADE_WORDS = {
+  s: ['קטן', 'קטנה', 'קטנים', 'קטנות', 'small'],
+  m: ['בינוני', 'בינונית', 'בינוניים', 'בינוניות', 'מדיום', 'medium'],
+  l: ['גדול', 'גדולה', 'גדולים', 'גדולות', 'לארג', 'large'],
+  xl: ['ענק', 'ענקית', 'ענקיים', 'ענקיות'],
+}
+const GRADES = new Set(Object.keys(GRADE_WORDS))
+/** Words that always name a kind of the product: a size on the scale, or a percentage. */
+const isKindWord = (w) => GRADES.has(w) || w.endsWith('%')
+/**
+ * Construct forms of the same word ("ביצי חופש" is "ביצים חופש", "תפוחי אדמה" is "תפוח
+ * אדמה"). Listed, not a rule: "חלבי" is not "חלב".
+ */
+const SAME_WORD = new Map([['ביצי', 'ביצ'], ['תפוחי', 'תפוח']])
+for (const [grade, words] of Object.entries(GRADE_WORDS)) {
+  for (const w of words) SAME_WORD.set(foldSuffix(normalizeName(w)), grade)
+}
 
 /**
  * Crude singular/plural folding: "עגבניה"/"עגבניות" → "עגבני", "מלפפון"/"מלפפונים"
@@ -167,11 +201,8 @@ const NO_STEM = new Set(['חלבה', 'שמנת', 'לבנה'])
  * Runs on normalized text, so the plural suffix is "ימ" (final מ already folded).
  */
 export function stemWord(w) {
-  if (NO_STEM.has(w)) return w
-  for (const suf of ['ות', 'ימ', 'ה', 'ת']) {
-    if (w.endsWith(suf) && w.length - suf.length >= 3) return w.slice(0, -suf.length)
-  }
-  return w
+  const stem = foldSuffix(w)
+  return SAME_WORD.get(stem) ?? stem
 }
 
 export function stemName(s) {
@@ -195,6 +226,7 @@ const NEUTRAL_STEMS = new Set(
     'במשקל', 'תפזורת', 'בתפזורת', 'שקיל', 'ארוז', 'ארוזה', 'ארוזות', 'בקרטון', 'בשקית',
     'טרי', 'טריה', 'טריים', 'יומי', 'מובחר', 'פרימיום', 'איכותי', 'ישראלי', 'ישראל',
     'מקומי', 'חממה', 'מהחממה', 'קרטון', 'בקבוק', 'בבקבוק', 'שקית', 'מהדרין', 'בדץ', 'כשר', 'כשרה',
+    'רגיל',
   ].map((w) => stemName(w)),
 )
 
@@ -218,29 +250,54 @@ const UNIT_WORDS = new Set(
   ['ל', 'ליטר', 'ליטרים', 'מל', 'מיליליטר', 'ג', 'גר', 'גרם', 'ק', 'קג', 'קילו', 'קילוגרם',
     'יח', 'יחי', 'יחיד', 'יחידה', 'יחידות', 'מטר', 'מטרים', 'גליל', 'גלילים', 'רולים'].map(normalizeName),
 )
-const SIZE_WORD = /^\d+(?:ל|ליטר|מל|ג|גר|גרמ|ק|קג|קילו|יח|יחי|יחיד|יחידה|יחידות|מ|מטר)?$/
-const isSizeWord = (w) => UNIT_WORDS.has(w) || SIZE_WORD.test(w)
+const SIZE_WORD = /^\d+(?:ל|ליטר|מל|ג|גר|גרמ|ק|קג|קילו|יח|יחי|יחיד|יחידה|יחידות|מ|מטר|l|ml|g|gr|kg)?$/
+const isSizeWord = (w) => UNIT_WORDS.has(w) || SIZE_WORD.test(w) || w === 'ml' || w === 'kg'
+const FAT = stemWord('שומנ')
 
 const tokenCache = new Map()
 
 /**
  * What a product name says about WHAT it is: its words (`s`) and their stems (`t`),
  * minus sizes and neutral qualifiers, so "משקה שיבולת שועל1ל" and "משקה שיבולת שועל
- * 1 ליטר" are the same thing. Cached: branch files repeat the same names.
+ * 1 ליטר" are the same thing. A percentage is one word however it is written ("%3",
+ * "3 %", "3% שומן"). Cached: branch files repeat the same names.
  */
 export function productTokens(name) {
   const key = String(name)
   const hit = tokenCache.get(key)
   if (hit) return hit
+  const text = key
+    .replace(/(?<!\d)%(\d+(?:[.,]\d+)?)/g, '$1%')
+    .replace(/(\d)\s+%/g, '$1%')
+    .replace(/(\d)[.,](\d+%)/g, '$1·$2') // a decimal point inside a percentage is not a word break
+    .replace(/(\p{L})(\d)/gu, '$1 $2')
   const t = []
   const s = []
-  for (const word of key.replace(/(\p{L})(\d)/gu, '$1 $2').split(/[\s,.\-/()+*:&;#!_=[\]|]+/)) {
+  let number = 0 // the number right before this word, if any
+  for (const word of text.split(/[\s,.\-/()+*:&;#!_=[\]|]+/)) {
     const norm = normalizeName(word)
-    if (!norm || isSizeWord(norm)) continue
+    // "1.5 L" is liters; "12 L" is a dozen of size L.
+    const liters = norm === 'l' && number > 0 && number <= 5
+    number = /^\d+$/.test(norm) ? Number(norm) : 0
+    if (!norm || liters || isSizeWord(norm)) continue
     const stem = stemWord(norm)
     if (NEUTRAL_STEMS.has(stem)) continue
+    if (stem === FAT && t.at(-1)?.endsWith('%')) continue
+    const surface = word.replace(/^["'`״׳]+|["`״]+$/g, '').replace('·', '.')
+    if (GRADES.has(stem)) {
+      const letter = /^[a-z]+$/i.test(surface)
+      const at = t.indexOf(stem)
+      if (at !== -1) {
+        // "גדול L" says L twice; the letter is the name people recognize.
+        if (letter) s[at] = stem.toUpperCase()
+        continue
+      }
+      t.push(stem)
+      s.push(letter ? stem.toUpperCase() : surface)
+      continue
+    }
     t.push(stem)
-    s.push(word.replace(/^["'`״׳]+|["`״]+$/g, ''))
+    s.push(surface)
   }
   const out = { t, s }
   tokenCache.set(key, out)
@@ -356,26 +413,39 @@ function familyEnd(tokens, query, p, cut) {
   return p + query.length
 }
 
-const familyBlocked = (extras) => extras.some((x) => FAMILY_BLOCK.some((b) => x.startsWith(b)))
+/** A name cut mid-word still counts: "משקה שיבולת שועל בטע" is flavored. */
+const familyBlocked = (extras, cut) =>
+  extras.some((x, i) =>
+    FAMILY_BLOCK.some(
+      (b) => x.startsWith(b) || (cut && i === extras.length - 1 && x.length >= 2 && b.startsWith(x)),
+    ),
+  )
 
 /**
  * Does a packaged item belong to the generic product `query` (stems)? The name must
  * start with it: Hebrew puts the head noun first, so "שמפו ... שמן זית" is shampoo
- * and "שוקולד חלב" is chocolate. Only a word the file itself gives as the
- * manufacturer may come before it ("יטבתה שמנת חמוצה", maker יטבתה).
+ * and "שוקולד חלב" is chocolate. A word the file itself gives as the manufacturer says
+ * who made it, not what it is, so it may come before the name ("יטבתה שמנת חמוצה") or
+ * inside it ("חלב תנובה 3%" is "חלב 3%"). Any other word in between makes it another
+ * kind: "חלב דל לקטוז 1%" is not "חלב 1%", and "ביצים אומגה L" is not "ביצים L".
  */
 export function matchesFamily(item, tokens, query) {
-  if (!query.length) return false
+  if (!query.length || !tokens.includes(query[0])) return false // the common case, and it's hot
   const cut = item.name.length >= 18 && item.name.length <= 24
-  const head = familyEnd(tokens, query, 0, cut)
-  if (head !== -1) return !familyBlocked(tokens.slice(head))
-  if (!tokens.includes(query[0])) return false // the common case, and it's hot
-  const maker = new Set(productTokens(item.maker ?? '').t)
-  for (let p = 0; p < tokens.length && maker.has(tokens[p]); p++) {
-    const end = familyEnd(tokens, query, p + 1, cut)
-    if (end !== -1) return !familyBlocked(tokens.slice(end))
+  const verdict = (list, p) => {
+    const end = familyEnd(list, query, p, cut)
+    return end === -1 ? null : !familyBlocked(list.slice(end), cut)
   }
-  return false
+  const direct = verdict(tokens, 0)
+  if (direct !== null) return direct
+  const maker = new Set(productTokens(item.maker ?? '').t)
+  if (!maker.size) return false
+  for (let p = 0; p < tokens.length && maker.has(tokens[p]); p++) {
+    const v = verdict(tokens, p + 1)
+    if (v !== null) return v
+  }
+  if (maker.has(tokens[0])) return false // the maker is named after the product ("שמן זית יד מרדכי")
+  return verdict(tokens.filter((x, i) => i === 0 || !maker.has(x)), 0) === true
 }
 
 /** A product name prepared for matchWeighed. */
@@ -480,38 +550,50 @@ class Catalog {
 
     // "אלפרו משקה שיבולת שועל" (maker אלפרו) belongs on the row "משקה שיבולת שועל", as
     // in matchesFamily. A lone word after the brand stays put: "קוקה קולה זירו" ≠ "זירו".
-    const withoutMaker = (e) => {
+    // A maker inside the name gives two paths, because both are real choices: "חלב
+    // תנובה 3%" is under "חלב 3%" and also under the brand "חלב תנובה".
+    const pathsOf = (e) => {
       const { t, s } = productTokens(e.name)
-      if (e.weighed) return { t, s }
+      if (e.weighed) return [{ t, s }]
       const maker = new Set(productTokens(e.maker ?? '').t)
       let lead = 0
       while (lead < t.length && maker.has(t[lead])) lead++
-      return lead > 0 && t.length - lead >= 2 ? { t: t.slice(lead), s: s.slice(lead) } : { t, s }
+      if (lead > 0) return [lead > 0 && t.length - lead >= 2 ? { t: t.slice(lead), s: s.slice(lead) } : { t, s }]
+      const keep = t.map((x, i) => i === 0 || !maker.has(x))
+      if (keep.every(Boolean)) return [{ t, s }]
+      return [{ t, s }, { t: t.filter((_, i) => keep[i]), s: s.filter((_, i) => keep[i]) }]
     }
 
     const nodes = new Map()
     for (const e of products) {
-      const path = withoutMaker(e)
-      let { t } = path
-      if (e.name.length === 20 && t.length > 1 && !whole.has(t[t.length - 1])) t = t.slice(0, -1)
-      for (let d = 1; d <= Math.min(t.length, CATALOG_MAX_DEPTH); d++) {
-        const key = t.slice(0, d).join(' ')
-        let n = nodes.get(key)
-        if (!n) nodes.set(key, (n = { key, count: 0, w: 0, plainW: false, mask: 0, surf: new Map(), maxKid: 0 }))
-        n.count++
-        n.mask |= e.mask
-        if (e.weighed) {
-          n.w++
-          if (d === t.length) n.plainW = true
-        }
-        if (e.weighed) {
-          for (const [nm, c] of e.names) {
-            const surface = productTokens(nm).s.slice(0, d).join(' ')
-            n.surf.set(surface, (n.surf.get(surface) ?? 0) + c)
+      const counted = new Set() // a product with two paths still counts once per node
+      for (const path of pathsOf(e)) {
+        let { t } = path
+        if (e.name.length === 20 && t.length > 1 && !whole.has(t[t.length - 1])) t = t.slice(0, -1)
+        for (let d = 1; d <= Math.min(t.length, CATALOG_MAX_DEPTH); d++) {
+          const key = t.slice(0, d).join(' ')
+          if (counted.has(key)) continue
+          counted.add(key)
+          let n = nodes.get(key)
+          if (!n) nodes.set(key, (n = { key, count: 0, w: 0, wMask: 0, plainW: false, mask: 0, surf: new Map(), maxKid: 0, whole: false }))
+          n.count++
+          n.mask |= e.mask
+          // This word cannot have been cut off if a name goes on after it, or is not cut-length.
+          if (d < t.length || e.name.length < 18 || e.name.length > 24) n.whole = true
+          if (e.weighed) {
+            n.w++
+            n.wMask |= e.mask
+            if (d === t.length) n.plainW = true
           }
-        } else {
-          const surface = path.s.slice(0, d).join(' ')
-          n.surf.set(surface, (n.surf.get(surface) ?? 0) + 1)
+          if (e.weighed) {
+            for (const [nm, c] of e.names) {
+              const surface = productTokens(nm).s.slice(0, d).join(' ')
+              n.surf.set(surface, (n.surf.get(surface) ?? 0) + c)
+            }
+          } else {
+            const surface = path.s.slice(0, d).join(' ')
+            n.surf.set(surface, (n.surf.get(surface) ?? 0) + 1)
+          }
         }
       }
     }
@@ -520,7 +602,8 @@ class Catalog {
       const cut = n.key.lastIndexOf(' ')
       if (cut === -1) continue
       const parent = nodes.get(n.key.slice(0, cut))
-      if (parent) parent.maxKid = Math.max(parent.maxKid, n.count)
+      // A size or percentage never swallows its parent: "ביצים אומגה" stays a row even if most are L.
+      if (parent && !isKindWord(n.key.slice(cut + 1))) parent.maxKid = Math.max(parent.maxKid, n.count)
       const parentKey = n.key.slice(0, cut)
       if (!siblingWords.has(parentKey)) siblingWords.set(parentKey, [])
       siblingWords.get(parentKey).push(n.key.slice(cut + 1))
@@ -531,7 +614,10 @@ class Catalog {
       // A node most of whose products continue with one word is that word's node
       // ("משקה שיבולת" → "משקה שיבולת שועל"), unless it is a plain produce name or a
       // single word, which people do type on its own ("קוטג").
-      const dominated = n.key.includes(' ') && n.maxKid >= 2 && n.maxKid >= 0.5 * n.count && !n.plainW
+      // Nor is a size or percentage swallowed: "כפפות ניטריל S" stays even if most are one brand.
+      const dominated =
+        n.key.includes(' ') && n.maxKid >= 2 && n.maxKid >= 0.5 * n.count && !n.plainW &&
+        !isKindWord(n.key.slice(n.key.lastIndexOf(' ') + 1))
       if (dominated) continue
       // Offered: what several products share, or a product alone under its first word.
       if (n.count < 2 && !(n.maxKid === 0 && nodes.get(n.key.split(' ')[0]).count === 1)) continue
@@ -539,16 +625,27 @@ class Catalog {
       let chainCount = 0
       for (let bits = n.mask; bits > 0; bits >>= 1) chainCount += bits & 1
       if (chainCount < 2 && n.count < 3) continue
-      const name = [...n.surf.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0]
-      if (name.length < 2) continue
       const words = n.key.split(' ')
       const lastWord = words[words.length - 1]
+      const grade = GRADES.has(lastWord)
+      // Where any chain writes a size as a letter, the row says the letter.
+      const surfaces = [...n.surf.entries()]
+      const letters = grade ? surfaces.filter(([x]) => /[A-Z]+$/.test(x)) : []
+      const name = (letters.length ? letters : surfaces).sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0]
+      if (name.length < 2) continue
       const tiny = /^[\u0590-\u05FF]{1,2}$/.test(lastWord)
       if (words.length > 1 ? DANGLING.has(lastWord) || tiny : tiny && n.count < 5) continue
       // A word cut off mid-way, with the whole word right beside it ("אור" / "אורגני").
+      // Only where every product could be cut: "ספגטי" beside "ספגטיני" is a real word.
       const siblings = siblingWords.get(n.key.slice(0, n.key.lastIndexOf(' '))) ?? []
-      if (words.length > 1 && siblings.some((w) => w.length > lastWord.length && w.startsWith(lastWord))) continue
-      families.push([name, n.mask, n.count, n.plainW || n.w === n.count ? 1 : 0])
+      if (!n.whole && !grade && words.length > 1 && siblings.some((w) => w.length > lastWord.length && w.startsWith(lastWord))) continue
+      // Sold by weight when most chains that have it do, as in kindOf: "מלפפון" beats the
+      // pickles and "בצל" counts its "בצל יבש", but one chain's deli does not make "שמנת
+      // חמוצה" a price per kg.
+      let weighedChains = 0
+      for (let bits = n.wMask; bits > 0; bits >>= 1) weighedChains += bits & 1
+      const byWeight = n.w === n.count || (n.w > 0 && weighedChains >= 0.5 * chainCount)
+      families.push([name, n.mask, n.count, byWeight ? 1 : 0])
     }
     return { updatedAt: new Date().toISOString(), chains: this.chains, families }
   }
@@ -888,6 +985,83 @@ async function resolveProducts(products, pins) {
   return { resolved, failures }
 }
 
+const PUBLISHED_CATALOG = 'https://raw.githubusercontent.com/ofekSro/kniot/data/catalog.json'
+const MAX_PRICED_CHOICES = 8 // what the app shows before "עוד"
+const GRADE_ORDER = [...GRADES]
+
+/**
+ * The choices the app offers around each tracked name (the published catalog's rows one
+ * step narrower, its siblings, its parent), so that picking one has a price right away
+ * instead of waiting for the next run. Priced for the first city only, to keep
+ * prices.json small: elsewhere a picked choice is tracked and priced on the next run.
+ * Same selection as choicesOf in src/lib/catalog.ts.
+ */
+async function choicesToPrice(resolved, source) {
+  let rows
+  try {
+    const raw = /^https?:/.test(source)
+      ? await (await fetch(source)).json()
+      : JSON.parse(readFileSync(source, 'utf-8'))
+    rows = raw.families.map(([name, mask, count, weighed]) => {
+      let chains = 0
+      for (let bits = mask; bits > 0; bits >>= 1) chains += bits & 1
+      return { name, chains, count, weighed: weighed === 1, t: productTokens(name).t }
+    })
+  } catch {
+    return [] // only a nicety: the names themselves are still priced
+  }
+  const startsWith = (t, prefix) => t.length >= prefix.length && prefix.every((x, i) => t[i] === x)
+  // Sizes in scale order, then percentages ascending, then by how widely sold.
+  const orderOf = (added) => {
+    const rest = GRADE_ORDER.length + 1
+    if (added.length !== 1) return rest
+    const grade = GRADE_ORDER.indexOf(added[0])
+    if (grade !== -1) return grade
+    const percent = /^(\d+)%$/.exec(added[0])
+    return percent ? GRADE_ORDER.length + Number(percent[1]) / 1000 : rest
+  }
+  const childrenOf = (parent) => {
+    const below = rows.filter((r) => r.t.length > parent.length && startsWith(r.t, parent))
+    const order = (r) => orderOf(r.t.slice(parent.length))
+    return below
+      .filter((r) => !below.some((o) => o.t.length < r.t.length && startsWith(r.t, o.t)))
+      .sort((a, b) => order(a) - order(b) || b.chains - a.chains || b.count - a.count)
+      .slice(0, MAX_PRICED_CHOICES)
+  }
+  const taken = new Set(resolved.map((r) => r.k))
+  const out = []
+  const add = (row) => {
+    const k = nameKeyOf(row.name)
+    if (taken.has(k)) return
+    taken.add(k)
+    out.push({
+      k,
+      n: row.name,
+      kind: row.weighed ? 'weighed' : 'family',
+      name: row.name,
+      product: row.name,
+      pinned: false,
+      candidates: [],
+      choice: true,
+    })
+  }
+  for (const r of resolved) {
+    if (!r.name) continue
+    const { t } = productTokens(r.name)
+    if (!t.length) continue
+    childrenOf(t).forEach(add)
+    for (let d = t.length - 1; d > 0; d--) {
+      const parent = t.slice(0, d)
+      const row = rows.find((x) => x.t.length === d && startsWith(x.t, parent))
+      if (!row) continue
+      add(row)
+      childrenOf(parent).forEach(add)
+      break
+    }
+  }
+  return out
+}
+
 // ---------------------------------------------------------------- main
 
 async function main() {
@@ -922,6 +1096,9 @@ async function main() {
   cities = [...new Set(cities)]
 
   const { resolved, failures: resolveFailures } = await resolveProducts(products, pins)
+  const choices = await choicesToPrice(resolved, opt('catalog', PUBLISHED_CATALOG))
+  resolved.push(...choices)
+  const choiceKeys = new Set(choices.map((r) => r.k))
   const wantedBarcodes = new Set(resolved.flatMap((r) => r.codes ?? (r.barcode ? [r.barcode] : [])))
   const weighedQueries = resolved
     .filter((r) => r.kind === 'weighed' || r.kind === 'auto')
@@ -932,7 +1109,7 @@ async function main() {
     .map((r) => ({ k: r.k, tokens: productTokens(r.name).t }))
     .filter((q) => q.tokens.length)
   const kinds = ['barcode', 'weighed', 'family', 'auto'].map((x) => `${x} ${resolved.filter((r) => r.kind === x).length}`)
-  console.log(`resolved ${resolved.length}/${products.length} products (${kinds.join(', ')}); cities: ${cities.length}`)
+  console.log(`resolved ${resolved.length - choices.length}/${products.length} products + ${choices.length} choices (${kinds.join(', ')}); cities: ${cities.length}`)
 
   mkdirSync(outDir, { recursive: true })
   const failures = [...resolveFailures]
@@ -1009,6 +1186,8 @@ async function main() {
         address: t.branch.address ?? '',
       })
       const fileItems = parseItems(xml)
+      // Choices are priced for the first city only (see choicesToPrice).
+      const home = t.city === cities[0]
       for (const it of fileItems) {
         if (!wantedBarcodes.has(it.code)) continue
         slice.priceByBarcode[it.code] ??= {}
@@ -1019,6 +1198,7 @@ async function main() {
       if (weighedQueries.length) {
         const weighted = fileItems.filter((i) => i.weighed).map((i) => ({ ...i, ...weighedQuery(i.name) }))
         for (const q of weighedQueries) {
+          if (!home && choiceKeys.has(q.k)) continue
           const m = matchWeighed(weighted, q)
           if (!m || (q.strict && m.score > 0.5)) continue
           slice.weighedByKey[q.k] ??= {}
@@ -1034,6 +1214,7 @@ async function main() {
           const { t: tokens } = productTokens(it.name)
           for (const q of familyQueries) {
             if (!matchesFamily(it, tokens, q.tokens)) continue
+            if (!home && choiceKeys.has(q.k)) continue
             const size = productSize(it.name, it.qty, it.unitQty, it.uom)
             slice.familyByKey[q.k] ??= {}
             const bySize = (slice.familyByKey[q.k][key] ??= {})
@@ -1069,7 +1250,24 @@ async function main() {
     return 'weighed'
   }
 
-  /** The one pack size a family is compared on: what the name says, else the most stocked. */
+  const familyRows = new Map(
+    resolved
+      .filter((r) => r.kind === 'family' || r.kind === 'auto')
+      .map((r) => [productTokens(r.name).t.join(' '), r]),
+  )
+  const parentOf = (r) => {
+    const { t } = productTokens(r.name)
+    for (let d = t.length - 1; d > 0; d--) {
+      const p = familyRows.get(t.slice(0, d).join(' '))
+      if (p && kindOf(p) === 'family') return p
+    }
+    return null
+  }
+
+  /**
+   * The one pack size a family is compared on: what the name says, else the parent's
+   * while that is well stocked ("חלב 3%" per liter, like "חלב"), else the most stocked.
+   */
   const familySize = (r) => {
     const hits = familySizeHits[r.k] ?? {}
     const named = productSize(r.name)
@@ -1082,6 +1280,11 @@ async function main() {
         best = size
         bestScore = score
       }
+    }
+    const parent = parentOf(r)
+    if (parent) {
+      const size = familySize(parent)
+      if (size && (hits[size] ?? 0) >= 0.7 * bestScore) return size
     }
     return best
   }
@@ -1103,7 +1306,8 @@ async function main() {
   const byCity = {}
   for (const city of cities) {
     const slice = acc[city]
-    const items = resolved.map((r) => {
+    const priceable = city === cities[0] ? resolved : resolved.filter((r) => !choiceKeys.has(r.k))
+    const items = priceable.map((r) => {
       const kind = kindOf(r)
       const common = { k: r.k, n: r.n, pinned: r.pinned ?? false, candidates: r.candidates }
       if (kind === 'weighed') {
@@ -1147,7 +1351,7 @@ async function main() {
         product: r.kind === 'auto' ? (r.barcodeName ?? r.product) : r.product,
         byStore,
       }
-    })
+    }).filter((it) => !choiceKeys.has(it.k) || Object.keys(it.byStore).length > 0)
     byCity[city] = { city, stores: slice.stores, items }
     const priced = items.filter((it) => Object.keys(it.byStore).length).length
     const chainsHere = new Set(slice.stores.map((s) => s.chain)).size
@@ -1162,7 +1366,7 @@ async function main() {
     // Back-compat top-level mirror of the first city (older app builds read this).
     city: first.city,
     stores: first.stores,
-    items: first.items,
+    items: first.items.filter((it) => !choiceKeys.has(it.k)),
   }
   writeFileSync(join(outDir, 'prices.json'), JSON.stringify(payload))
   writeFileSync(
