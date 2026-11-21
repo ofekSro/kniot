@@ -10,9 +10,8 @@ whitelisted Google accounts. Live at https://kniot-1299d.web.app (Firebase proje
 
 Git repo: `github.com/ofekSro/kniot` (public), `main` is deployed. A separate
 orphan `data` branch is machine-written by the price Action (see below) — never merge
-it. The working directory lives inside OneDrive ("OneDrive - Technion"): sync can
-transiently lock files (node_modules, dev-server output), so a mysterious EPERM/EBUSY is
-usually sync, not code. `gh` is not on PATH; auth here has used the GitHub device flow
+it. The working directory is `C:\dev\Kniot` (moved out of OneDrive on 2026-11-21, so
+sync no longer locks files). `gh` is not on PATH; auth here has used the GitHub device flow
 (client id `178c6fc778ccc68e1d6a`, scopes `repo,workflow`) with a portable `gh` binary
 or a token in a one-shot push URL — never persist a token in git config or a committed
 file.
